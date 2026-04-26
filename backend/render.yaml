@@ -2,6 +2,7 @@ services:
   - type: web
     name: synkarya-backend
     env: node
+    rootDir: backend
     buildCommand: npm install
     startCommand: node src/server.js
     envVars:

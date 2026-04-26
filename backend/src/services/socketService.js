@@ -7,148 +7,99 @@ const { getDb } = require('../config/firebase');
 const MAX_ROOM_SIZE = 12;
 
 const setupSocketHandlers = (io) => {
-  // Auth middleware for all socket connections
   io.use(authenticateSocket);
 
   io.on('connection', (socket) => {
-    const { uid, displayName, avatar } = socket.user;
-    console.log(`🔌 Socket connected: ${displayName} (${uid}) [${socket.id}]`);
+    // Guard: if auth failed somehow, disconnect immediately
+    if (!socket.user || !socket.user.uid) {
+      console.warn('Socket connected without valid user — disconnecting');
+      socket.disconnect(true);
+      return;
+    }
 
-    // ─────────────────────────────────────────────
-    // JOIN ROOM
-    // ─────────────────────────────────────────────
+    const { uid, displayName, avatar } = socket.user;
+    console.log(`🔌 Connected: ${displayName} (${uid}) [${socket.id}]`);
+
+    // ── JOIN ROOM ──────────────────────────────────────────────────────────────
     socket.on('join_room', async ({ roomId, roomName }) => {
       try {
-        const currentUsers = roomState.getRoomUsers(roomId);
+        if (!roomId) { socket.emit('error', { message: 'roomId is required' }); return; }
 
+        const currentUsers = roomState.getRoomUsers(roomId);
         if (currentUsers.length >= MAX_ROOM_SIZE) {
           socket.emit('error', { message: 'Room is full (max 12 participants)' });
           return;
         }
 
-        // Check if user is already in room (reconnect scenario)
+        // Handle reconnect: remove old socket mapping
         const existing = roomState.getUserInRoom(roomId, uid);
-        if (existing) {
-          // Remove old socket mapping
-          roomState.leaveRoom(existing.socketId);
-        }
+        if (existing) roomState.leaveRoom(existing.socketId);
 
         const sessionId = uuidv4();
         socket.join(roomId);
         roomState.joinRoom(roomId, uid, socket.id, displayName, sessionId);
 
-        // Record attendance
         await recordJoin({ uid, displayName, roomId, roomName: roomName || roomId, sessionId });
 
-        // Send existing users list to the new joiner
+        // Send existing peers to joiner
         const usersInRoom = roomState.getRoomUsers(roomId).filter((u) => u.uid !== uid);
         socket.emit('users_in_room', {
-          users: usersInRoom.map((u) => ({
-            uid: u.uid,
-            displayName: u.displayName,
-            socketId: u.socketId,
-          })),
+          users: usersInRoom.map((u) => ({ uid: u.uid, displayName: u.displayName, socketId: u.socketId })),
         });
 
-        // Notify existing users that someone joined
-        socket.to(roomId).emit('user_joined', {
-          uid,
-          displayName,
-          avatar,
-          socketId: socket.id,
-        });
+        // Notify existing users
+        socket.to(roomId).emit('user_joined', { uid, displayName, avatar, socketId: socket.id });
 
-        console.log(`📥 ${displayName} joined room ${roomId} (${roomState.getRoomCount(roomId)} users)`);
+        console.log(`📥 ${displayName} joined ${roomId} (${roomState.getRoomCount(roomId)} users)`);
       } catch (err) {
         console.error('join_room error:', err);
         socket.emit('error', { message: 'Failed to join room' });
       }
     });
 
-    // ─────────────────────────────────────────────
-    // LEAVE ROOM (explicit)
-    // ─────────────────────────────────────────────
-    socket.on('leave_room', async () => {
-      await handleLeave(socket, io);
-    });
+    // ── LEAVE ROOM ─────────────────────────────────────────────────────────────
+    socket.on('leave_room', async () => { await handleLeave(socket, io); });
 
-    // ─────────────────────────────────────────────
-    // WebRTC SIGNALING
-    // ─────────────────────────────────────────────
-
-    // Offer: sender → specific peer
+    // ── WebRTC SIGNALING ───────────────────────────────────────────────────────
     socket.on('offer', ({ targetUid, offer, roomId }) => {
-      const targetUser = roomState.getUserInRoom(roomId, targetUid);
-      if (!targetUser) {
-        socket.emit('peer_unavailable', { targetUid });
-        return;
-      }
-      io.to(targetUser.socketId).emit('offer', {
-        offer,
-        fromUid: uid,
-        fromDisplayName: displayName,
-        fromSocketId: socket.id,
-      });
+      const target = roomState.getUserInRoom(roomId, targetUid);
+      if (!target) { socket.emit('peer_unavailable', { targetUid }); return; }
+      io.to(target.socketId).emit('offer', { offer, fromUid: uid, fromDisplayName: displayName, fromSocketId: socket.id });
     });
 
-    // Answer: receiver → offerer
     socket.on('answer', ({ targetUid, answer, roomId }) => {
-      const targetUser = roomState.getUserInRoom(roomId, targetUid);
-      if (!targetUser) return;
-      io.to(targetUser.socketId).emit('answer', {
-        answer,
-        fromUid: uid,
-      });
+      const target = roomState.getUserInRoom(roomId, targetUid);
+      if (!target) return;
+      io.to(target.socketId).emit('answer', { answer, fromUid: uid });
     });
 
-    // ICE candidate relay
     socket.on('ice_candidate', ({ targetUid, candidate, roomId }) => {
-      const targetUser = roomState.getUserInRoom(roomId, targetUid);
-      if (!targetUser) return;
-      io.to(targetUser.socketId).emit('ice_candidate', {
-        candidate,
-        fromUid: uid,
-      });
+      const target = roomState.getUserInRoom(roomId, targetUid);
+      if (!target) return;
+      io.to(target.socketId).emit('ice_candidate', { candidate, fromUid: uid });
     });
 
-    // ─────────────────────────────────────────────
-    // RENEGOTIATION (for screen share switches)
-    // ─────────────────────────────────────────────
     socket.on('renegotiate', ({ targetUid, offer, roomId }) => {
-      const targetUser = roomState.getUserInRoom(roomId, targetUid);
-      if (!targetUser) return;
-      io.to(targetUser.socketId).emit('renegotiate', {
-        offer,
-        fromUid: uid,
-      });
+      const target = roomState.getUserInRoom(roomId, targetUid);
+      if (!target) return;
+      io.to(target.socketId).emit('renegotiate', { offer, fromUid: uid });
     });
 
     socket.on('renegotiate_answer', ({ targetUid, answer, roomId }) => {
-      const targetUser = roomState.getUserInRoom(roomId, targetUid);
-      if (!targetUser) return;
-      io.to(targetUser.socketId).emit('renegotiate_answer', {
-        answer,
-        fromUid: uid,
-      });
+      const target = roomState.getUserInRoom(roomId, targetUid);
+      if (!target) return;
+      io.to(target.socketId).emit('renegotiate_answer', { answer, fromUid: uid });
     });
 
-    // ─────────────────────────────────────────────
-    // MEDIA STATE BROADCAST (mute/camera/screen)
-    // ─────────────────────────────────────────────
+    // ── MEDIA STATE ────────────────────────────────────────────────────────────
     socket.on('media_state', ({ roomId, audioEnabled, videoEnabled, screenSharing }) => {
-      socket.to(roomId).emit('peer_media_state', {
-        uid,
-        audioEnabled,
-        videoEnabled,
-        screenSharing,
-      });
+      socket.to(roomId).emit('peer_media_state', { uid, audioEnabled, videoEnabled, screenSharing });
     });
 
-    // ─────────────────────────────────────────────
-    // CHAT
-    // ─────────────────────────────────────────────
+    // ── CHAT ───────────────────────────────────────────────────────────────────
     socket.on('chat_message', async ({ roomId, message, fileUrl, fileType, fileName }) => {
       try {
+        if (!roomId) return;
         const msgData = {
           id: uuidv4(),
           uid,
@@ -162,36 +113,26 @@ const setupSocketHandlers = (io) => {
           roomId,
         };
 
-        // Persist to Firestore
         const db = getDb();
         await db.collection('messages').doc(msgData.id).set(msgData);
-
-        // Broadcast to entire room (including sender for consistency)
         io.in(roomId).emit('chat_message', msgData);
       } catch (err) {
         console.error('chat_message error:', err);
       }
     });
 
-    // Typing indicator
     socket.on('typing', ({ roomId, isTyping }) => {
+      if (!roomId) return;
       socket.to(roomId).emit('user_typing', { uid, displayName, isTyping });
     });
 
-    // ─────────────────────────────────────────────
-    // DISCONNECT
-    // ─────────────────────────────────────────────
+    // ── DISCONNECT ─────────────────────────────────────────────────────────────
     socket.on('disconnect', async (reason) => {
-      console.log(`🔌 Socket disconnected: ${displayName} [${socket.id}] — ${reason}`);
+      console.log(`🔌 Disconnected: ${displayName} [${socket.id}] — ${reason}`);
       await handleLeave(socket, io);
     });
 
-    // ─────────────────────────────────────────────
-    // PING/PONG (keep-alive)
-    // ─────────────────────────────────────────────
-    socket.on('ping', () => {
-      socket.emit('pong', { timestamp: Date.now() });
-    });
+    socket.on('ping', () => socket.emit('pong', { timestamp: Date.now() }));
   });
 };
 
@@ -202,10 +143,8 @@ const handleLeave = async (socket, io) => {
   const { uid, roomId, displayName, sessionId } = userInfo;
   socket.leave(roomId);
 
-  // Record attendance leave
   const leaveData = await recordLeave({ uid, roomId, sessionId });
 
-  // Notify room
   io.in(roomId).emit('user_left', {
     uid,
     displayName,
@@ -213,7 +152,7 @@ const handleLeave = async (socket, io) => {
     durationSeconds: leaveData?.durationSeconds,
   });
 
-  console.log(`📤 ${displayName} left room ${roomId}`);
+  console.log(`📤 ${displayName} left ${roomId}`);
 };
 
 module.exports = { setupSocketHandlers };

@@ -1,13 +1,11 @@
 const { v4: uuidv4 } = require('uuid');
 const { getDb } = require('../config/firebase');
 
-const generateRoomCode = () => {
-  return Math.random().toString(36).substring(2, 8).toUpperCase();
-};
+const generateRoomCode = () => Math.random().toString(36).substring(2, 8).toUpperCase();
 
 const createRoom = async (req, res) => {
   try {
-    const { name, type = 'open' } = req.body; // type: 'open' | 'private'
+    const { name, type = 'open' } = req.body;
     const { uid, displayName } = req.user;
 
     if (!name || name.trim().length < 2) {
@@ -22,7 +20,7 @@ const createRoom = async (req, res) => {
       roomId,
       name: name.trim(),
       code: roomCode,
-      type, // 'open' = anyone can search/join | 'private' = code only
+      type,
       hostUid: uid,
       hostName: displayName,
       createdAt: new Date().toISOString(),
@@ -31,38 +29,36 @@ const createRoom = async (req, res) => {
     };
 
     await db.collection('rooms').doc(roomId).set(roomData);
-
-    return res.status(201).json({
-      message: 'Room created',
-      room: roomData,
-    });
+    return res.status(201).json({ message: 'Room created', room: roomData });
   } catch (err) {
-    console.error('Create room error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Create room error:', err.message);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
   }
 };
 
 const getRooms = async (req, res) => {
   try {
     const db = getDb();
+    // Simple query — no composite index needed
     const snapshot = await db
       .collection('rooms')
       .where('type', '==', 'open')
       .where('isActive', '==', true)
-      .orderBy('createdAt', 'desc')
       .limit(50)
       .get();
 
     const rooms = snapshot.docs.map((doc) => {
-      const data = doc.data();
-      const { ...safeRoom } = data;
-      return safeRoom;
+      const { passwordHash, ...safe } = doc.data();
+      return safe;
     });
+
+    // Sort in memory to avoid needing a Firestore composite index
+    rooms.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     return res.status(200).json({ rooms });
   } catch (err) {
-    console.error('Get rooms error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Get rooms error:', err.message);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
   }
 };
 
@@ -82,7 +78,6 @@ const getRoomByCode = async (req, res) => {
     }
 
     const roomData = snapshot.docs[0].data();
-
     return res.status(200).json({
       room: {
         roomId: roomData.roomId,
@@ -90,12 +85,13 @@ const getRoomByCode = async (req, res) => {
         code: roomData.code,
         type: roomData.type,
         hostName: roomData.hostName,
+        hostUid: roomData.hostUid,
         participantCount: roomData.participantCount,
       },
     });
   } catch (err) {
-    console.error('Get room by code error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Get room by code error:', err.message);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
   }
 };
 
@@ -104,14 +100,10 @@ const getRoomById = async (req, res) => {
     const { roomId } = req.params;
     const db = getDb();
     const doc = await db.collection('rooms').doc(roomId).get();
-
-    if (!doc.exists) {
-      return res.status(404).json({ error: 'Room not found' });
-    }
-
+    if (!doc.exists) return res.status(404).json({ error: 'Room not found' });
     return res.status(200).json({ room: doc.data() });
   } catch (err) {
-    return res.status(500).json({ error: 'Internal server error' });
+    return res.status(500).json({ error: err.message || 'Internal server error' });
   }
 };
 

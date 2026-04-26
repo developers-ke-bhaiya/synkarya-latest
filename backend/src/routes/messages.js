@@ -5,7 +5,6 @@ const { getDb } = require('../config/firebase');
 
 router.use(authenticate);
 
-// Get recent messages for a room
 router.get('/room/:roomId', async (req, res) => {
   try {
     const { roomId } = req.params;
@@ -15,16 +14,17 @@ router.get('/room/:roomId', async (req, res) => {
     const snapshot = await db
       .collection('messages')
       .where('roomId', '==', roomId)
-      .orderBy('timestamp', 'desc')
       .limit(limit)
       .get();
 
-    const messages = snapshot.docs.map((doc) => doc.data()).reverse();
+    const messages = snapshot.docs.map((doc) => doc.data());
+    // Sort in memory — avoids needing Firestore composite index
+    messages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
 
     return res.status(200).json({ messages });
   } catch (err) {
-    console.error('Get messages error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Get messages error:', err.message);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
   }
 });
 

@@ -8,15 +8,16 @@ const getAttendance = async (req, res) => {
     const snapshot = await db
       .collection('attendance')
       .where('roomId', '==', roomId)
-      .orderBy('joinTime', 'desc')
+      .limit(100)
       .get();
 
     const records = snapshot.docs.map((doc) => doc.data());
+    records.sort((a, b) => new Date(b.joinTime) - new Date(a.joinTime));
 
     return res.status(200).json({ attendance: records });
   } catch (err) {
-    console.error('Get attendance error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Get attendance error:', err.message);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
   }
 };
 
@@ -28,16 +29,16 @@ const getMyAttendance = async (req, res) => {
     const snapshot = await db
       .collection('attendance')
       .where('uid', '==', uid)
-      .orderBy('joinTime', 'desc')
       .limit(50)
       .get();
 
     const records = snapshot.docs.map((doc) => doc.data());
+    records.sort((a, b) => new Date(b.joinTime) - new Date(a.joinTime));
 
     return res.status(200).json({ attendance: records });
   } catch (err) {
-    console.error('Get my attendance error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Get my attendance error:', err.message);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
   }
 };
 

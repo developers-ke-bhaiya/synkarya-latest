@@ -1,18 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Zap, Hash, Plus, Search, LogOut, ClipboardList,
-  Globe, Lock, Loader, Users, ChevronRight
+  Zap, Hash, Plus, Search, LogOut, Globe, Lock, ChevronRight, ClipboardList
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../../store/authStore';
 import { useCallStore } from '../../store/callStore';
 import { roomsApi } from '../../services/api';
 import { Avatar } from '../ui/Avatar';
 import { useToast } from '../ui/Toast';
 import { Spinner } from '../ui/Spinner';
-import { getSocket } from '../../services/socket';
+import { getSocket, disconnectSocket } from '../../services/socket';
 import { useWebRTC } from '../../hooks/useWebRTC';
 import { useChat } from '../../hooks/useChat';
-import { disconnectSocket } from '../../services/socket';
 
 export const Sidebar = ({ onRoomJoined }) => {
   const [rooms, setRooms] = useState([]);
@@ -29,10 +28,9 @@ export const Sidebar = ({ onRoomJoined }) => {
   const { addToast } = useToast();
   const { initLocalStream } = useWebRTC();
   const { loadHistory } = useChat();
+  const navigate = useNavigate();
 
-  useEffect(() => {
-    loadRooms();
-  }, []);
+  useEffect(() => { loadRooms(); }, []);
 
   const loadRooms = async () => {
     setLoadingRooms(true);
@@ -79,22 +77,24 @@ export const Sidebar = ({ onRoomJoined }) => {
 
   const joinRoom = async (room) => {
     if (currentRoom?.roomId === room.roomId) return;
-    if (inCall) {
-      addToast('Leave current call first', 'info');
-      return;
-    }
+    if (inCall) { addToast('Leave current call first', 'info'); return; }
+
     setJoiningRoom(room.roomId);
     try {
       await initLocalStream();
-      const socket = getSocket();
+
       const { setCurrentRoom, setInCall } = useCallStore.getState();
       setCurrentRoom(room);
       setInCall(true);
+
+      // Get fresh socket AFTER setting auth (token already in localStorage)
+      const socket = getSocket();
       socket.emit('join_room', { roomId: room.roomId, roomName: room.name });
+
       await loadHistory(room.roomId);
       onRoomJoined?.(room);
     } catch (err) {
-      addToast('Failed to access camera/mic. Check permissions.', 'error');
+      addToast('Failed to access camera/mic. Check browser permissions.', 'error');
       console.error(err);
     } finally {
       setJoiningRoom(null);
@@ -109,6 +109,7 @@ export const Sidebar = ({ onRoomJoined }) => {
     }
     disconnectSocket();
     logout();
+    navigate('/login');
   };
 
   return (
@@ -139,6 +140,11 @@ export const Sidebar = ({ onRoomJoined }) => {
           <Search size={16} />
           <span className="text-sm">Join by code</span>
         </button>
+        <button onClick={() => navigate('/attendance')}
+          className="sidebar-item w-full text-left">
+          <ClipboardList size={16} />
+          <span className="text-sm">My Attendance</span>
+        </button>
       </div>
 
       {/* Create room form */}
@@ -146,31 +152,21 @@ export const Sidebar = ({ onRoomJoined }) => {
         <form onSubmit={handleCreateRoom}
           className="px-3 py-3 space-y-2 animate-slide-up"
           style={{ borderBottom: '1px solid var(--border)' }}>
-          <input
-            className="input-field text-sm py-2"
-            placeholder="Room name"
-            value={createForm.name}
-            onChange={(e) => setCreateForm((f) => ({ ...f, name: e.target.value }))}
-            autoFocus
-            required
-          />
+          <input className="input-field text-sm py-2" placeholder="Room name"
+            value={createForm.name} onChange={(e) => setCreateForm((f) => ({ ...f, name: e.target.value }))}
+            autoFocus required />
           <div className="flex gap-2">
-            <button type="button"
-              onClick={() => setCreateForm((f) => ({ ...f, type: 'open' }))}
-              className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs
-                transition-all ${createForm.type === 'open'
-                  ? 'bg-amber-400/15 text-amber-400 border border-amber-400/30'
-                  : 'bg-white/5 text-slate-500 hover:text-white'}`}>
-              <Globe size={11} /> Open
-            </button>
-            <button type="button"
-              onClick={() => setCreateForm((f) => ({ ...f, type: 'private' }))}
-              className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs
-                transition-all ${createForm.type === 'private'
-                  ? 'bg-amber-400/15 text-amber-400 border border-amber-400/30'
-                  : 'bg-white/5 text-slate-500 hover:text-white'}`}>
-              <Lock size={11} /> Private
-            </button>
+            {['open', 'private'].map((t) => (
+              <button key={t} type="button"
+                onClick={() => setCreateForm((f) => ({ ...f, type: t }))}
+                className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs transition-all
+                  ${createForm.type === t
+                    ? 'bg-amber-400/15 text-amber-400 border border-amber-400/30'
+                    : 'bg-white/5 text-slate-500 hover:text-white'}`}>
+                {t === 'open' ? <Globe size={11} /> : <Lock size={11} />}
+                {t.charAt(0).toUpperCase() + t.slice(1)}
+              </button>
+            ))}
           </div>
           <div className="flex gap-2">
             <button type="button" onClick={() => setShowCreate(false)}
@@ -186,27 +182,22 @@ export const Sidebar = ({ onRoomJoined }) => {
         </form>
       )}
 
-      {/* Join by code form */}
+      {/* Join by code */}
       {showJoinCode && (
         <form onSubmit={handleJoinByCode}
           className="px-3 py-3 space-y-2 animate-slide-up"
           style={{ borderBottom: '1px solid var(--border)' }}>
-          <input
-            className="input-field text-sm py-2 font-mono uppercase tracking-widest"
-            placeholder="ROOM CODE"
-            value={joinCode}
+          <input className="input-field text-sm py-2 font-mono uppercase tracking-widest"
+            placeholder="ROOM CODE" value={joinCode}
             onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-            maxLength={6}
-            autoFocus
-          />
+            maxLength={6} autoFocus />
           <div className="flex gap-2">
             <button type="button" onClick={() => setShowJoinCode(false)}
               className="flex-1 py-1.5 rounded-lg text-xs bg-white/5 text-slate-400 hover:text-white transition-all">
               Cancel
             </button>
             <button type="submit"
-              className="flex-1 py-1.5 rounded-lg text-xs bg-amber-400 text-navy-950 font-semibold
-                hover:bg-amber-500 transition-all">
+              className="flex-1 py-1.5 rounded-lg text-xs bg-amber-400 text-navy-950 font-semibold hover:bg-amber-500 transition-all">
               Join
             </button>
           </div>
@@ -216,7 +207,12 @@ export const Sidebar = ({ onRoomJoined }) => {
       {/* Rooms list */}
       <div className="flex-1 overflow-y-auto py-2">
         <div className="px-3 mb-2">
-          <span className="label">Open rooms</span>
+          <div className="flex items-center justify-between">
+            <span className="label">Open rooms</span>
+            <button onClick={loadRooms} className="text-xs text-slate-600 hover:text-slate-400 transition-colors">
+              Refresh
+            </button>
+          </div>
         </div>
 
         {loadingRooms ? (
@@ -231,22 +227,16 @@ export const Sidebar = ({ onRoomJoined }) => {
               const isActive = currentRoom?.roomId === room.roomId;
               const isJoining = joiningRoom === room.roomId;
               return (
-                <button
-                  key={room.roomId}
-                  onClick={() => joinRoom(room)}
-                  disabled={isJoining}
+                <button key={room.roomId} onClick={() => joinRoom(room)} disabled={isJoining}
                   className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl
                     transition-all duration-200 text-left group
-                    ${isActive
-                      ? 'bg-amber-400/10 text-amber-400'
-                      : 'text-slate-400 hover:text-white hover:bg-white/5'}`}>
+                    ${isActive ? 'bg-amber-400/10 text-amber-400' : 'text-slate-400 hover:text-white hover:bg-white/5'}`}>
                   <Hash size={14} className={isActive ? 'text-amber-400' : 'text-slate-600'} />
                   <span className="text-sm flex-1 truncate">{room.name}</span>
-                  {isJoining ? (
-                    <Spinner size="sm" />
-                  ) : (
-                    <ChevronRight size={13} className="opacity-0 group-hover:opacity-100 transition-opacity" />
-                  )}
+                  {isJoining
+                    ? <Spinner size="sm" />
+                    : <ChevronRight size={13} className="opacity-0 group-hover:opacity-100 transition-opacity" />
+                  }
                 </button>
               );
             })}
@@ -257,15 +247,14 @@ export const Sidebar = ({ onRoomJoined }) => {
       {/* User profile */}
       <div className="px-3 py-3 flex items-center gap-3"
         style={{ borderTop: '1px solid var(--border)' }}>
-        <Avatar name={user?.displayName} size="sm" />
+        <Avatar name={user?.displayName || '?'} size="sm" />
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-white truncate">{user?.displayName}</p>
-          <p className="text-xs text-slate-500 truncate">@{user?.username}</p>
+          <p className="text-sm font-medium text-white truncate">{user?.displayName || 'User'}</p>
+          <p className="text-xs text-slate-500 truncate">{user?.email || ''}</p>
         </div>
         <button onClick={handleLogout}
           className="w-7 h-7 rounded-lg hover:bg-red-500/15 flex items-center justify-center
-            text-slate-500 hover:text-red-400 transition-all"
-          title="Sign out">
+            text-slate-500 hover:text-red-400 transition-all" title="Sign out">
           <LogOut size={14} />
         </button>
       </div>

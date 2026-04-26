@@ -10,16 +10,16 @@ const getStoredUser = () => {
   }
 };
 
-export const useAuthStore = create((set, get) => ({
+export const useAuthStore = create((set) => ({
   user: getStoredUser(),
   token: localStorage.getItem('synkarya_token') || null,
   isLoading: false,
   error: null,
 
-  login: async (username, password) => {
+  login: async (email, password) => {
     set({ isLoading: true, error: null });
     try {
-      const { data } = await authApi.login({ username, password });
+      const { data } = await authApi.login({ email, password });
       localStorage.setItem('synkarya_token', data.token);
       localStorage.setItem('synkarya_user', JSON.stringify(data.user));
       set({ user: data.user, token: data.token, isLoading: false });
@@ -31,10 +31,10 @@ export const useAuthStore = create((set, get) => ({
     }
   },
 
-  register: async (username, password, displayName) => {
+  register: async (email, password, displayName) => {
     set({ isLoading: true, error: null });
     try {
-      const { data } = await authApi.register({ username, password, displayName });
+      const { data } = await authApi.register({ email, password, displayName });
       localStorage.setItem('synkarya_token', data.token);
       localStorage.setItem('synkarya_user', JSON.stringify(data.user));
       set({ user: data.user, token: data.token, isLoading: false });

@@ -6,7 +6,7 @@ import { useToast } from '../ui/Toast';
 import { Spinner } from '../ui/Spinner';
 
 export const RegisterPage = () => {
-  const [form, setForm] = useState({ username: '', displayName: '', password: '', confirm: '' });
+  const [form, setForm] = useState({ email: '', displayName: '', password: '', confirm: '' });
   const [showPw, setShowPw] = useState(false);
   const { register, isLoading } = useAuthStore();
   const { addToast } = useToast();
@@ -20,7 +20,7 @@ export const RegisterPage = () => {
       addToast('Passwords do not match', 'error');
       return;
     }
-    const result = await register(form.username.trim(), form.password, form.displayName.trim());
+    const result = await register(form.email.trim(), form.password, form.displayName.trim());
     if (result.success) {
       addToast('Account created! Welcome to Synkarya.', 'success');
       navigate('/');
@@ -54,14 +54,14 @@ export const RegisterPage = () => {
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label className="label">Display Name</label>
+              <label className="label">Full Name</label>
               <input className="input-field" type="text" placeholder="Jane Doe"
                 value={form.displayName} onChange={set('displayName')} required />
             </div>
             <div>
-              <label className="label">Username</label>
-              <input className="input-field" type="text" placeholder="jane_doe"
-                value={form.username} onChange={set('username')} autoComplete="username" required />
+              <label className="label">Email</label>
+              <input className="input-field" type="email" placeholder="you@example.com"
+                value={form.email} onChange={set('email')} autoComplete="email" required />
             </div>
             <div>
               <label className="label">Password</label>
