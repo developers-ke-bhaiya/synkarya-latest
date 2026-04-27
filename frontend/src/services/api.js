@@ -7,53 +7,50 @@ const api = axios.create({
   timeout: 10000,
 });
 
-// Attach JWT to every request
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('synkarya_token');
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
-  }
+  if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
 
-// Handle 401 globally
 api.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    if (error.response?.status === 401) {
+  (res) => res,
+  (err) => {
+    if (err.response?.status === 401) {
       localStorage.removeItem('synkarya_token');
       localStorage.removeItem('synkarya_user');
       window.location.href = '/login';
     }
-    return Promise.reject(error);
+    return Promise.reject(err);
   }
 );
 
-// ─── Auth ─────────────────────────────────────────────────────────────────────
 export const authApi = {
   register: (data) => api.post('/auth/register', data),
   login: (data) => api.post('/auth/login', data),
   getMe: () => api.get('/auth/me'),
 };
 
-// ─── Rooms ────────────────────────────────────────────────────────────────────
 export const roomsApi = {
   create: (data) => api.post('/rooms', data),
   list: () => api.get('/rooms'),
   getByCode: (code) => api.get(`/rooms/code/${code}`),
-  getById: (roomId) => api.get(`/rooms/${roomId}`),
+  getById: (id) => api.get(`/rooms/${id}`),
 };
 
-// ─── Attendance ───────────────────────────────────────────────────────────────
 export const attendanceApi = {
   getMyAttendance: () => api.get('/attendance/me'),
   getRoomAttendance: (roomId) => api.get(`/attendance/room/${roomId}`),
 };
 
-// ─── Messages ─────────────────────────────────────────────────────────────────
 export const messagesApi = {
-  getRoomMessages: (roomId, limit = 50) =>
-    api.get(`/messages/room/${roomId}`, { params: { limit } }),
+  getRoomMessages: (roomId, limit = 50) => api.get(`/messages/room/${roomId}`, { params: { limit } }),
+};
+
+export const usersApi = {
+  getOnlineUsers: () => api.get('/users/online'),
+  updateStatus: (status) => api.post('/users/status', { status }),
+  getStatusHistory: (uid) => api.get(`/users/status-history/${uid}`),
 };
 
 export default api;
