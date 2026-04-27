@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { X, Send, Paperclip } from 'lucide-react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { X, Send } from 'lucide-react';
 import { useChatStore } from '../../store/chatStore';
 import { useAuthStore } from '../../store/authStore';
 import { useChat } from '../../hooks/useChat';
@@ -15,43 +15,56 @@ export const ChatPanel = () => {
   const { sendMessage, sendTyping } = useChat();
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+  const typingTimeoutRef = useRef(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
   useEffect(() => {
-    if (isChatOpen) inputRef.current?.focus();
+    if (isChatOpen) setTimeout(() => inputRef.current?.focus(), 100);
   }, [isChatOpen]);
 
-  const handleSend = () => {
+  const handleSend = useCallback(() => {
     if (!input.trim() || !currentRoom) return;
-    sendMessage(currentRoom.roomId, input);
+    sendMessage(currentRoom.roomId, input.trim());
     setInput('');
+    // Stop typing indicator
+    clearTimeout(typingTimeoutRef.current);
     sendTyping(currentRoom.roomId, false);
-  };
+  }, [input, currentRoom, sendMessage, sendTyping]);
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
-    } else {
-      sendTyping(currentRoom?.roomId, true);
+      return;
     }
+    // Typing indicator debounce
+    if (!currentRoom) return;
+    sendTyping(currentRoom.roomId, true);
+    clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => {
+      sendTyping(currentRoom.roomId, false);
+    }, 2000);
   };
 
   const typingList = Array.from(typingUsers.values()).filter((n) => n !== user?.displayName);
 
-  if (!isChatOpen) return null;
+  // Group consecutive messages from same user
+  const grouped = messages.map((msg, i) => ({
+    ...msg,
+    showAvatar: i === 0 || messages[i - 1]?.uid !== msg.uid,
+    showName: i === 0 || messages[i - 1]?.uid !== msg.uid,
+  }));
 
   return (
-    <div className="flex flex-col w-80 flex-shrink-0 animate-slide-in-right"
-      style={{ background: 'var(--bg-secondary)', borderLeft: '1px solid var(--border)' }}>
+    <div className="flex flex-col h-full" style={{ background: 'var(--bg-secondary)' }}>
 
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3.5"
+      <div className="flex items-center justify-between px-4 py-3.5 flex-shrink-0"
         style={{ borderBottom: '1px solid var(--border)' }}>
-        <h3 className="font-semibold text-white" style={{ fontFamily: 'Syne, sans-serif' }}>
+        <h3 className="font-semibold text-white text-sm" style={{ fontFamily: 'Syne, sans-serif' }}>
           Chat
         </h3>
         <button onClick={closeChat}
@@ -62,46 +75,41 @@ export const ChatPanel = () => {
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3" style={{ minHeight: 0 }}>
+      <div className="flex-1 overflow-y-auto px-3 py-3 space-y-1 min-h-0">
         {messages.length === 0 && (
-          <div className="text-center text-slate-600 text-sm mt-10">
-            No messages yet. Say hello!
+          <div className="text-center text-slate-600 text-sm pt-10 px-4">
+            No messages yet. Start the conversation!
           </div>
         )}
 
-        {messages.map((msg, i) => {
+        {grouped.map((msg) => {
           const isMe = msg.uid === user?.uid;
-          const prevMsg = messages[i - 1];
-          const showAvatar = !prevMsg || prevMsg.uid !== msg.uid;
-
           return (
-            <div key={msg.id} className={`flex gap-2.5 ${isMe ? 'flex-row-reverse' : ''}`}>
-              {!isMe && showAvatar && (
-                <Avatar name={msg.displayName} size="sm" className="mt-1 flex-shrink-0" />
-              )}
-              {!isMe && !showAvatar && <div className="w-8" />}
+            <div key={msg.id}
+              className={`flex gap-2 ${isMe ? 'flex-row-reverse' : ''} ${msg.showAvatar ? 'mt-3' : 'mt-0.5'}`}>
 
-              <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} max-w-[85%]`}>
-                {showAvatar && !isMe && (
+              {/* Avatar */}
+              {!isMe && (
+                msg.showAvatar
+                  ? <Avatar name={msg.displayName} size="sm" className="flex-shrink-0 mt-1" />
+                  : <div className="w-8 flex-shrink-0" />
+              )}
+
+              <div className={`flex flex-col max-w-[78%] ${isMe ? 'items-end' : 'items-start'}`}>
+                {msg.showName && !isMe && (
                   <span className="text-xs text-slate-500 mb-1 ml-1">{msg.displayName}</span>
                 )}
-                <div className={`px-3 py-2 rounded-2xl text-sm leading-relaxed
+                <div className={`px-3 py-2 rounded-2xl text-sm leading-relaxed break-words
                   ${isMe
                     ? 'bg-amber-400/20 text-amber-50 rounded-tr-sm'
-                    : 'bg-white/5 text-slate-200 rounded-tl-sm'
-                  }`}>
+                    : 'bg-white/6 text-slate-200 rounded-tl-sm'}`}>
                   {msg.message && <p>{msg.message}</p>}
-                  {msg.fileUrl && (
-                    <a href={msg.fileUrl} target="_blank" rel="noreferrer"
-                      className="flex items-center gap-2 text-amber-400 hover:underline mt-1">
-                      <Paperclip size={12} />
-                      <span className="text-xs">{msg.fileName || 'File'}</span>
-                    </a>
-                  )}
                 </div>
-                <span className="text-xs text-slate-600 mt-0.5 mx-1">
-                  {formatMessageTime(msg.timestamp)}
-                </span>
+                {msg.showAvatar && (
+                  <span className="text-xs text-slate-600 mt-0.5 mx-1">
+                    {formatMessageTime(msg.timestamp)}
+                  </span>
+                )}
               </div>
             </div>
           );
@@ -109,21 +117,21 @@ export const ChatPanel = () => {
 
         {/* Typing indicator */}
         {typingList.length > 0 && (
-          <div className="flex items-center gap-2 text-xs text-slate-500">
+          <div className="flex items-center gap-2 text-xs text-slate-500 mt-2 ml-1">
             <div className="flex gap-0.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-slate-500 animate-bounce" style={{ animationDelay: '0ms' }} />
-              <span className="w-1.5 h-1.5 rounded-full bg-slate-500 animate-bounce" style={{ animationDelay: '150ms' }} />
-              <span className="w-1.5 h-1.5 rounded-full bg-slate-500 animate-bounce" style={{ animationDelay: '300ms' }} />
+              {[0, 1, 2].map((i) => (
+                <span key={i} className="w-1.5 h-1.5 rounded-full bg-slate-500 animate-bounce"
+                  style={{ animationDelay: `${i * 150}ms` }} />
+              ))}
             </div>
-            {typingList.join(', ')} {typingList.length === 1 ? 'is' : 'are'} typing
+            <span>{typingList.slice(0, 2).join(', ')} {typingList.length === 1 ? 'is' : 'are'} typing</span>
           </div>
         )}
-
         <div ref={messagesEndRef} />
       </div>
 
       {/* Input */}
-      <div className="p-3" style={{ borderTop: '1px solid var(--border)' }}>
+      <div className="flex-shrink-0 p-3" style={{ borderTop: '1px solid var(--border)' }}>
         <div className="flex items-end gap-2">
           <textarea
             ref={inputRef}
@@ -132,17 +140,16 @@ export const ChatPanel = () => {
             onKeyDown={handleKeyDown}
             placeholder="Send a message..."
             rows={1}
-            className="input-field resize-none flex-1 py-2.5 text-sm"
-            style={{ minHeight: '42px', maxHeight: '120px' }}
+            className="input-field resize-none flex-1 py-2.5 text-sm leading-5"
+            style={{ minHeight: '42px', maxHeight: '100px' }}
           />
           <button
             onClick={handleSend}
             disabled={!input.trim()}
             className="w-10 h-10 rounded-xl bg-amber-400 hover:bg-amber-500 disabled:opacity-30
               flex items-center justify-center transition-all duration-200 flex-shrink-0
-              disabled:cursor-not-allowed hover:scale-105 active:scale-95"
-          >
-            <Send size={16} className="text-navy-950" />
+              hover:scale-105 active:scale-95 disabled:cursor-not-allowed disabled:hover:scale-100">
+            <Send size={15} className="text-navy-950" />
           </button>
         </div>
       </div>

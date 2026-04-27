@@ -6,13 +6,17 @@ const { getDb } = require('../config/firebase');
 
 const MAX_ROOM_SIZE = 12;
 
-// Track online users: uid → { uid, displayName, socketId, status }
+// uid → { uid, displayName, avatar, socketId, status, statusUpdatedAt }
 const onlineUsers = new Map();
+
+const broadcastOnline = (io) => {
+  io.emit('online_users', Array.from(onlineUsers.values()));
+};
 
 const setupSocketHandlers = (io) => {
   io.use(authenticateSocket);
 
-  io.on('connection', (socket) => {
+  io.on('connection', async (socket) => {
     if (!socket.user || !socket.user.uid) {
       socket.disconnect(true);
       return;
@@ -21,16 +25,28 @@ const setupSocketHandlers = (io) => {
     const { uid, displayName, avatar } = socket.user;
     console.log(`🔌 Connected: ${displayName} (${uid})`);
 
-    // ── ONLINE PRESENCE ────────────────────────────────────────────────────────
-    onlineUsers.set(uid, { uid, displayName, avatar, socketId: socket.id, status: null });
+    // ── AUTO-UPDATE lastSeen on every connect (fixes online list bug) ─────────
+    try {
+      const db = getDb();
+      const now = new Date().toISOString();
+      await db.collection('users').doc(uid).update({ lastSeen: now });
 
-    // Broadcast updated online list to everyone
-    const broadcastOnline = () => {
-      io.emit('online_users', Array.from(onlineUsers.values()));
-    };
-    broadcastOnline();
+      // Fetch current status to include in online list
+      const userDoc = await db.collection('users').doc(uid).get();
+      const userData = userDoc.data() || {};
 
-    // Send current list to this user
+      onlineUsers.set(uid, {
+        uid, displayName, avatar,
+        socketId: socket.id,
+        status: userData.currentStatus || null,
+        statusUpdatedAt: userData.statusUpdatedAt || null,
+      });
+    } catch (err) {
+      console.error('lastSeen update error:', err.message);
+      onlineUsers.set(uid, { uid, displayName, avatar, socketId: socket.id, status: null });
+    }
+
+    broadcastOnline(io);
     socket.emit('online_users', Array.from(onlineUsers.values()));
 
     // ── STATUS UPDATE ──────────────────────────────────────────────────────────
@@ -38,8 +54,9 @@ const setupSocketHandlers = (io) => {
       const user = onlineUsers.get(uid);
       if (user) {
         user.status = status;
+        user.statusUpdatedAt = new Date().toISOString();
         onlineUsers.set(uid, user);
-        broadcastOnline();
+        broadcastOnline(io);
       }
     });
 
@@ -68,7 +85,7 @@ const setupSocketHandlers = (io) => {
         });
 
         socket.to(roomId).emit('user_joined', { uid, displayName, avatar, socketId: socket.id });
-        console.log(`📥 ${displayName} joined ${roomId}`);
+        console.log(`📥 ${displayName} joined ${roomId} (${roomState.getRoomCount(roomId)} users)`);
       } catch (err) {
         console.error('join_room error:', err);
         socket.emit('error', { message: 'Failed to join room' });
@@ -77,7 +94,7 @@ const setupSocketHandlers = (io) => {
 
     socket.on('leave_room', async () => { await handleLeave(socket, io); });
 
-    // ── WebRTC SIGNALING (room calls) ──────────────────────────────────────────
+    // ── WebRTC SIGNALING ───────────────────────────────────────────────────────
     socket.on('offer', ({ targetUid, offer, roomId }) => {
       const target = roomState.getUserInRoom(roomId, targetUid);
       if (!target) { socket.emit('peer_unavailable', { targetUid }); return; }
@@ -108,41 +125,26 @@ const setupSocketHandlers = (io) => {
       io.to(target.socketId).emit('renegotiate_answer', { answer, fromUid: uid });
     });
 
-    // ── PRIVATE 1v1 DIRECT CALL SIGNALING ─────────────────────────────────────
-    // Step 1: Caller requests a call
+    // ── PRIVATE 1v1 CALL SIGNALING ─────────────────────────────────────────────
     socket.on('direct_call_request', ({ targetUid }) => {
       const targetUser = onlineUsers.get(targetUid);
-      if (!targetUser) {
-        socket.emit('direct_call_error', { message: 'User is not online' });
-        return;
-      }
-      io.to(targetUser.socketId).emit('direct_call_incoming', {
-        fromUid: uid,
-        fromDisplayName: displayName,
-        fromAvatar: avatar,
-      });
-      // Notify caller that ring was sent
+      if (!targetUser) { socket.emit('direct_call_error', { message: 'User is not online' }); return; }
+      io.to(targetUser.socketId).emit('direct_call_incoming', { fromUid: uid, fromDisplayName: displayName, fromAvatar: avatar });
       socket.emit('direct_call_ringing', { targetUid });
     });
 
-    // Step 2: Callee accepts
     socket.on('direct_call_accept', ({ targetUid }) => {
       const targetUser = onlineUsers.get(targetUid);
       if (!targetUser) return;
-      io.to(targetUser.socketId).emit('direct_call_accepted', {
-        fromUid: uid,
-        fromDisplayName: displayName,
-      });
+      io.to(targetUser.socketId).emit('direct_call_accepted', { fromUid: uid, fromDisplayName: displayName });
     });
 
-    // Step 3: Callee rejects
     socket.on('direct_call_reject', ({ targetUid }) => {
       const targetUser = onlineUsers.get(targetUid);
       if (!targetUser) return;
       io.to(targetUser.socketId).emit('direct_call_rejected', { fromUid: uid });
     });
 
-    // Step 4: WebRTC for direct calls (uid-based, no room)
     socket.on('direct_offer', ({ targetUid, offer }) => {
       const targetUser = onlineUsers.get(targetUid);
       if (!targetUser) return;
@@ -161,11 +163,24 @@ const setupSocketHandlers = (io) => {
       io.to(targetUser.socketId).emit('direct_ice_candidate', { candidate, fromUid: uid });
     });
 
-    // Step 5: End direct call
     socket.on('direct_call_end', ({ targetUid }) => {
       const targetUser = onlineUsers.get(targetUid);
       if (!targetUser) return;
       io.to(targetUser.socketId).emit('direct_call_ended', { fromUid: uid });
+    });
+
+    // Direct call chat
+    socket.on('direct_chat_message', ({ targetUid, message }) => {
+      const targetUser = onlineUsers.get(targetUid);
+      if (!targetUser) return;
+      const msgData = {
+        id: uuidv4(), uid, displayName, avatar,
+        message: message?.trim() || '',
+        timestamp: new Date().toISOString(),
+      };
+      // Send to both
+      io.to(targetUser.socketId).emit('direct_chat_message', msgData);
+      socket.emit('direct_chat_message', msgData);
     });
 
     // ── MEDIA STATE ────────────────────────────────────────────────────────────
@@ -173,14 +188,13 @@ const setupSocketHandlers = (io) => {
       socket.to(roomId).emit('peer_media_state', { uid, audioEnabled, videoEnabled, screenSharing });
     });
 
-    // Direct call media state
     socket.on('direct_media_state', ({ targetUid, audioEnabled, videoEnabled, screenSharing }) => {
       const targetUser = onlineUsers.get(targetUid);
       if (!targetUser) return;
       io.to(targetUser.socketId).emit('direct_peer_media_state', { uid, audioEnabled, videoEnabled, screenSharing });
     });
 
-    // ── CHAT ───────────────────────────────────────────────────────────────────
+    // ── ROOM CHAT ──────────────────────────────────────────────────────────────
     socket.on('chat_message', async ({ roomId, message, fileUrl, fileType, fileName }) => {
       try {
         if (!roomId) return;
@@ -192,6 +206,7 @@ const setupSocketHandlers = (io) => {
         };
         const db = getDb();
         await db.collection('messages').doc(msgData.id).set(msgData);
+        // Emit to room — sender is IN the room so they receive too
         io.in(roomId).emit('chat_message', msgData);
       } catch (err) {
         console.error('chat_message error:', err);
@@ -207,7 +222,7 @@ const setupSocketHandlers = (io) => {
     socket.on('disconnect', async (reason) => {
       console.log(`🔌 Disconnected: ${displayName} — ${reason}`);
       onlineUsers.delete(uid);
-      broadcastOnline();
+      broadcastOnline(io);
       await handleLeave(socket, io);
     });
 

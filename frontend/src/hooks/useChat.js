@@ -3,25 +3,26 @@ import { useChatStore } from '../store/chatStore';
 import { getSocket } from '../services/socket';
 import { messagesApi } from '../services/api';
 
-export const useChat = () => {
+export const useChat = (roomId) => {
   const { addMessage, setMessages, setTyping, clearChat } = useChatStore();
   const typingTimerRef = useRef(null);
-  const socket = getSocket();
+  // Track if we've already registered listeners for this roomId
+  const registeredRef = useRef(false);
 
-  const loadHistory = useCallback(async (roomId) => {
+  const loadHistory = useCallback(async (rid) => {
     try {
-      const { data } = await messagesApi.getRoomMessages(roomId);
+      const { data } = await messagesApi.getRoomMessages(rid);
       setMessages(data.messages || []);
     } catch (err) {
       console.error('Failed to load message history:', err);
     }
   }, [setMessages]);
 
-  const sendMessage = useCallback((roomId, message, fileData = null) => {
+  const sendMessage = useCallback((rid, message, fileData = null) => {
     if (!message?.trim() && !fileData) return;
-    const s = getSocket();
-    s.emit('chat_message', {
-      roomId,
+    const socket = getSocket();
+    socket.emit('chat_message', {
+      roomId: rid,
       message: message?.trim() || '',
       fileUrl: fileData?.url || null,
       fileType: fileData?.type || null,
@@ -29,19 +30,29 @@ export const useChat = () => {
     });
   }, []);
 
-  const sendTyping = useCallback((roomId, isTyping) => {
-    const s = getSocket();
-    s.emit('typing', { roomId, isTyping });
+  const sendTyping = useCallback((rid, isTyping) => {
+    const socket = getSocket();
+    socket.emit('typing', { roomId: rid, isTyping });
     if (isTyping) {
       clearTimeout(typingTimerRef.current);
       typingTimerRef.current = setTimeout(() => {
-        s.emit('typing', { roomId, isTyping: false });
+        socket.emit('typing', { roomId: rid, isTyping: false });
       }, 3000);
     }
   }, []);
 
+  // Register socket listeners ONCE — critical fix for duplicate messages
   useEffect(() => {
-    const onMessage = (msg) => addMessage(msg);
+    const socket = getSocket();
+
+    // Remove any existing listeners before adding new ones
+    socket.off('chat_message');
+    socket.off('user_typing');
+
+    const onMessage = (msg) => {
+      addMessage(msg);
+    };
+
     const onTyping = ({ uid, displayName, isTyping }) => {
       setTyping(uid, displayName, isTyping);
       if (isTyping) {
@@ -57,7 +68,7 @@ export const useChat = () => {
       socket.off('user_typing', onTyping);
       clearTimeout(typingTimerRef.current);
     };
-  }, [socket, addMessage, setTyping]);
+  }, []); // Empty deps — register once for lifetime of app
 
   return { sendMessage, sendTyping, loadHistory, clearChat };
 };
