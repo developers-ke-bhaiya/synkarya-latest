@@ -50,7 +50,6 @@ export const useWebRTC = () => {
 
     pc.ontrack = ({ track }) => {
       remoteStream.addTrack(track);
-      // Force React re-render by creating new MediaStream reference
       setRemoteStream(remoteUid, new MediaStream(remoteStream.getTracks()));
     };
 
@@ -76,7 +75,7 @@ export const useWebRTC = () => {
     setPeerInfo(remoteUid, { displayName: remoteDisplayName });
     return pc;
   }, [addPeerConnection, setRemoteStream, removeRemoteStream, removePeerConnection,
-    removePeerInfo, setPeerInfo, socket, currentRoom]);
+      removePeerInfo, setPeerInfo, socket, currentRoom]);
 
   const sendOffer = useCallback(async (remoteUid, remoteDisplayName) => {
     const pc = createPeer(remoteUid, remoteDisplayName);
@@ -106,9 +105,9 @@ export const useWebRTC = () => {
         if (!pc) return;
       }
       try {
-        const offerCollision = offer.type === 'offer' &&
+        const collision = offer.type === 'offer' &&
           (makingOfferRef.current.has(fromUid) || pc.signalingState !== 'stable');
-        if (offerCollision) {
+        if (collision) {
           if (pc.signalingState !== 'stable') await pc.setLocalDescription({ type: 'rollback' });
           makingOfferRef.current.delete(fromUid);
         }
@@ -126,7 +125,7 @@ export const useWebRTC = () => {
       catch (err) { console.error('onAnswer error:', err); }
     };
 
-    const onIceCandidate = async ({ candidate, fromUid }) => {
+    const onIce = async ({ candidate, fromUid }) => {
       const pc = useCallStore.getState().peerConnections.get(fromUid);
       if (!pc || pc.signalingState === 'closed') return;
       try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); }
@@ -139,7 +138,7 @@ export const useWebRTC = () => {
       removePeerInfo(uid);
     };
 
-    const onPeerMediaState = ({ uid, audioEnabled, videoEnabled, screenSharing }) => {
+    const onPeerMedia = ({ uid, audioEnabled, videoEnabled, screenSharing }) => {
       setPeerInfo(uid, { audioEnabled, videoEnabled, screenSharing });
     };
 
@@ -165,9 +164,9 @@ export const useWebRTC = () => {
     socket.on('user_joined', onUserJoined);
     socket.on('offer', onOffer);
     socket.on('answer', onAnswer);
-    socket.on('ice_candidate', onIceCandidate);
+    socket.on('ice_candidate', onIce);
     socket.on('user_left', onUserLeft);
-    socket.on('peer_media_state', onPeerMediaState);
+    socket.on('peer_media_state', onPeerMedia);
     socket.on('renegotiate', onRenegotiate);
     socket.on('renegotiate_answer', onRenegotiateAnswer);
 
@@ -176,17 +175,18 @@ export const useWebRTC = () => {
       socket.off('user_joined', onUserJoined);
       socket.off('offer', onOffer);
       socket.off('answer', onAnswer);
-      socket.off('ice_candidate', onIceCandidate);
+      socket.off('ice_candidate', onIce);
       socket.off('user_left', onUserLeft);
-      socket.off('peer_media_state', onPeerMediaState);
+      socket.off('peer_media_state', onPeerMedia);
       socket.off('renegotiate', onRenegotiate);
       socket.off('renegotiate_answer', onRenegotiateAnswer);
     };
   }, [socket, currentRoom, createPeer, sendOffer, setPeerInfo,
-    removePeerConnection, removeRemoteStream, removePeerInfo]);
+      removePeerConnection, removeRemoteStream, removePeerInfo]);
 
-  // FIX: Toggle audio — replace track on all peers instead of just disabling
-  const toggleAudio = useCallback(async () => {
+  // ── FIX: Toggle audio ─────────────────────────────────────────────────────
+  // Simply enable/disable track — no replaceTrack needed for audio
+  const toggleAudio = useCallback(() => {
     const newState = !audioEnabled;
     const stream = localStreamRef.current;
     if (stream) {
@@ -194,51 +194,61 @@ export const useWebRTC = () => {
     }
     setAudioEnabled(newState);
     socket.emit('media_state', {
-      roomId: currentRoom?.roomId, audioEnabled: newState,
-      videoEnabled, screenSharing: isScreenSharing,
+      roomId: currentRoom?.roomId,
+      audioEnabled: newState, videoEnabled, screenSharing: isScreenSharing,
     });
   }, [audioEnabled, videoEnabled, isScreenSharing, setAudioEnabled, socket, currentRoom]);
 
-  // FIX: Toggle video — use replaceTrack with black frame instead of just disabling
+  // ── FIX: Toggle video ─────────────────────────────────────────────────────
+  // Use replaceTrack so remote peer sees the change immediately
   const toggleVideo = useCallback(async () => {
     const newState = !videoEnabled;
     const stream = localStreamRef.current;
 
-    if (stream) {
-      const videoTracks = stream.getVideoTracks();
-      if (!newState) {
-        // Turn OFF: disable tracks
-        videoTracks.forEach((t) => { t.enabled = false; });
-      } else {
-        // Turn ON: re-enable existing tracks first
-        videoTracks.forEach((t) => { t.enabled = true; });
+    if (!stream) return;
 
-        // If no video tracks exist (e.g., started audio-only), try to get camera
-        if (videoTracks.length === 0) {
-          try {
-            const camStream = await getUserMedia({ video: true, audio: false });
-            const camTrack = camStream.getVideoTracks()[0];
-            stream.addTrack(camTrack);
-            localStreamRef.current = stream;
-            // Add to all peer connections
-            const allPeers = useCallStore.getState().peerConnections;
-            allPeers.forEach((pc) => {
+    if (!newState) {
+      // Turning OFF — disable track
+      stream.getVideoTracks().forEach((t) => { t.enabled = false; });
+    } else {
+      // Turning ON — re-enable existing track
+      const videoTracks = stream.getVideoTracks();
+      if (videoTracks.length > 0) {
+        videoTracks.forEach((t) => { t.enabled = true; });
+      } else {
+        // No video track exists (started audio-only) — get camera fresh
+        try {
+          const camStream = await getUserMedia({ video: true, audio: false });
+          const camTrack = camStream.getVideoTracks()[0];
+          stream.addTrack(camTrack);
+          localStreamRef.current = stream;
+          setLocalStream(stream);
+
+          // Add track to all existing peer connections
+          const allPeers = useCallStore.getState().peerConnections;
+          for (const [peerUid, pc] of allPeers) {
+            try {
               pc.addTrack(camTrack, stream);
-            });
-          } catch (err) {
-            console.error('Failed to re-enable camera:', err);
+            } catch {}
           }
+        } catch (err) {
+          console.error('Failed to get camera:', err);
+          return;
         }
       }
     }
 
     setVideoEnabled(newState);
-    socket.emit('media_state', {
-      roomId: currentRoom?.roomId, audioEnabled,
-      videoEnabled: newState, screenSharing: isScreenSharing,
-    });
-  }, [audioEnabled, videoEnabled, isScreenSharing, setVideoEnabled, socket, currentRoom]);
+    // Update local stream reference in store so VideoTile re-renders
+    setLocalStream(new MediaStream(stream.getTracks()));
 
+    socket.emit('media_state', {
+      roomId: currentRoom?.roomId,
+      audioEnabled, videoEnabled: newState, screenSharing: isScreenSharing,
+    });
+  }, [audioEnabled, videoEnabled, isScreenSharing, setVideoEnabled, setLocalStream, socket, currentRoom]);
+
+  // ── Screen share ───────────────────────────────────────────────────────────
   const startScreenShare = useCallback(async () => {
     try {
       const screenStream = await getDisplayMedia();

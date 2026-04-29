@@ -5,13 +5,14 @@ const { getDb } = require('../config/firebase');
 
 router.use(authenticate);
 
-// Get all users who logged in today (online users)
+// Get all users who logged in today
 router.get('/online', async (req, res) => {
   try {
     const db = getDb();
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
 
+    // Simple query — no composite index needed
     const snapshot = await db
       .collection('users')
       .where('lastSeen', '>=', todayStart.toISOString())
@@ -31,22 +32,21 @@ router.get('/online', async (req, res) => {
           statusUpdatedAt: d.statusUpdatedAt || null,
         };
       })
-      .filter((u) => u.uid !== req.user.uid); // exclude self
+      .filter((u) => u.uid !== req.user.uid);
 
     return res.status(200).json({ users });
   } catch (err) {
     console.error('Get online users error:', err.message);
-    return res.status(500).json({ error: err.message });
+    // Fallback: return empty list instead of 500
+    return res.status(200).json({ users: [], error: err.message });
   }
 });
 
-// Update current status (kya kaam kar rahe ho)
+// Update status — save to Firestore
 router.post('/status', async (req, res) => {
   try {
     const { status } = req.body;
-    if (!status || !status.trim()) {
-      return res.status(400).json({ error: 'Status is required' });
-    }
+    if (!status?.trim()) return res.status(400).json({ error: 'Status required' });
 
     const db = getDb();
     const now = new Date().toISOString();
@@ -56,23 +56,21 @@ router.post('/status', async (req, res) => {
       statusUpdatedAt: now,
     });
 
-    // Also store in statusHistory for attendance reporting
     await db.collection('statusHistory').add({
       uid: req.user.uid,
       displayName: req.user.displayName,
       status: status.trim(),
       timestamp: now,
-      date: new Date().toDateString(),
     });
 
-    return res.status(200).json({ message: 'Status updated', status: status.trim(), updatedAt: now });
+    return res.status(200).json({ message: 'Status updated', status: status.trim() });
   } catch (err) {
     console.error('Update status error:', err.message);
     return res.status(500).json({ error: err.message });
   }
 });
 
-// Get status history for a user (for attendance)
+// Get status history
 router.get('/status-history/:uid', async (req, res) => {
   try {
     const db = getDb();
@@ -84,7 +82,6 @@ router.get('/status-history/:uid', async (req, res) => {
 
     const history = snapshot.docs.map((d) => d.data());
     history.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-
     return res.status(200).json({ history });
   } catch (err) {
     return res.status(500).json({ error: err.message });
