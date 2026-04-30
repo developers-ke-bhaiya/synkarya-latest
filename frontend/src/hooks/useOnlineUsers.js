@@ -1,50 +1,34 @@
-import { useEffect, useCallback, useRef } from 'react';
+import { useEffect } from 'react';
 import { useOnlineStore } from '../store/onlineStore';
 import { getSocket } from '../services/socket';
-import { usersApi } from '../services/api';
 
 export const useOnlineUsers = () => {
   const { setOnlineUsers } = useOnlineStore();
-  const socket = getSocket();
-  // FIX: track if we've already fetched REST to avoid duplicate calls
-  const hasFetchedRef = useRef(false);
 
-  // FIX: Fetch initial list from REST on mount (once)
   useEffect(() => {
-    if (hasFetchedRef.current) return;
-    hasFetchedRef.current = true;
+    const socket = getSocket();
 
-    usersApi.getOnlineUsers()
-      .then(({ data }) => {
-        if (data.users?.length > 0) {
-          setOnlineUsers(data.users);
-        }
-      })
-      .catch((err) => console.warn('getOnlineUsers REST error:', err.message));
-  }, []);
-
-  // FIX: Real-time socket updates — always register on mount
-  useEffect(() => {
     const onOnlineUsers = (users) => {
-      setOnlineUsers(users);
+      setOnlineUsers(Array.isArray(users) ? users : []);
     };
 
-    // Remove any stale listener first
+    // FIX: remove stale listener before adding — prevents accumulation
     socket.off('online_users', onOnlineUsers);
     socket.on('online_users', onOnlineUsers);
 
-    // FIX: Also request fresh list from server on mount via socket
-    // This triggers a broadcastOnline on the backend so we get the current list
+    // Request current list immediately
     socket.emit('ping');
+
+    // FIX: also re-request when socket reconnects (after network drop)
+    const onReconnect = () => {
+      console.log('[Online] Socket reconnected — refreshing online list');
+      socket.emit('ping');
+    };
+    socket.io?.on('reconnect', onReconnect);
 
     return () => {
       socket.off('online_users', onOnlineUsers);
+      socket.io?.off('reconnect', onReconnect);
     };
-  }, [socket, setOnlineUsers]);
-
-  const updateStatus = useCallback((status) => {
-    socket.emit('update_status', { status });
-  }, [socket]);
-
-  return { updateStatus };
+  }, [setOnlineUsers]);
 };

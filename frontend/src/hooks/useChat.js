@@ -3,26 +3,29 @@ import { useChatStore } from '../store/chatStore';
 import { getSocket } from '../services/socket';
 import { messagesApi } from '../services/api';
 
-export const useChat = (roomId) => {
-  const { addMessage, setMessages, setTyping, clearChat } = useChatStore();
+export const useChat = () => {
+  const { addMessage, setMessages, setTyping } = useChatStore();
   const typingTimerRef = useRef(null);
-  // Track if we've already registered listeners for this roomId
-  const registeredRef = useRef(false);
 
-  const loadHistory = useCallback(async (rid) => {
+  const loadHistory = useCallback(async (roomId) => {
     try {
-      const { data } = await messagesApi.getRoomMessages(rid);
+      const { data } = await messagesApi.getRoomMessages(roomId);
       setMessages(data.messages || []);
     } catch (err) {
-      console.error('Failed to load message history:', err);
+      console.error('Failed to load history:', err);
+      setMessages([]);
     }
   }, [setMessages]);
 
-  const sendMessage = useCallback((rid, message, fileData = null) => {
-    if (!message?.trim() && !fileData) return;
+  // FIX: sendMessage reads roomId at call time from param — never from stale closure
+  const sendMessage = useCallback((roomId, message, fileData = null) => {
+    if ((!message?.trim() && !fileData) || !roomId) {
+      console.warn('[Chat] sendMessage called without roomId or message', { roomId, message });
+      return;
+    }
     const socket = getSocket();
     socket.emit('chat_message', {
-      roomId: rid,
+      roomId,
       message: message?.trim() || '',
       fileUrl: fileData?.url || null,
       fileType: fileData?.type || null,
@@ -30,36 +33,30 @@ export const useChat = (roomId) => {
     });
   }, []);
 
-  const sendTyping = useCallback((rid, isTyping) => {
+  const sendTyping = useCallback((roomId, isTyping) => {
+    if (!roomId) return;
     const socket = getSocket();
-    socket.emit('typing', { roomId: rid, isTyping });
+    socket.emit('typing', { roomId, isTyping });
     if (isTyping) {
       clearTimeout(typingTimerRef.current);
       typingTimerRef.current = setTimeout(() => {
-        socket.emit('typing', { roomId: rid, isTyping: false });
+        socket.emit('typing', { roomId, isTyping: false });
       }, 3000);
     }
   }, []);
 
-  // Register socket listeners ONCE — critical fix for duplicate messages
+  // Register socket listeners once for app lifetime
   useEffect(() => {
     const socket = getSocket();
 
-    // Remove any existing listeners before adding new ones
-    socket.off('chat_message');
-    socket.off('user_typing');
-
-    const onMessage = (msg) => {
-      addMessage(msg);
-    };
-
+    const onMessage = (msg) => addMessage(msg);
     const onTyping = ({ uid, displayName, isTyping }) => {
       setTyping(uid, displayName, isTyping);
-      if (isTyping) {
-        setTimeout(() => setTyping(uid, displayName, false), 4000);
-      }
+      if (isTyping) setTimeout(() => setTyping(uid, displayName, false), 4000);
     };
 
+    socket.off('chat_message', onMessage);
+    socket.off('user_typing', onTyping);
     socket.on('chat_message', onMessage);
     socket.on('user_typing', onTyping);
 
@@ -68,7 +65,7 @@ export const useChat = (roomId) => {
       socket.off('user_typing', onTyping);
       clearTimeout(typingTimerRef.current);
     };
-  }, []); // Empty deps — register once for lifetime of app
+  }, [addMessage, setTyping]);
 
-  return { sendMessage, sendTyping, loadHistory, clearChat };
+  return { sendMessage, sendTyping, loadHistory };
 };
