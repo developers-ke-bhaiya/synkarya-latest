@@ -1,4 +1,4 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useRef } from 'react';
 import { useOnlineStore } from '../store/onlineStore';
 import { getSocket } from '../services/socket';
 import { usersApi } from '../services/api';
@@ -6,26 +6,40 @@ import { usersApi } from '../services/api';
 export const useOnlineUsers = () => {
   const { setOnlineUsers } = useOnlineStore();
   const socket = getSocket();
+  // FIX: track if we've already fetched REST to avoid duplicate calls
+  const hasFetchedRef = useRef(false);
 
-  // Fetch initial online users from REST API on mount
+  // FIX: Fetch initial list from REST on mount (once)
   useEffect(() => {
+    if (hasFetchedRef.current) return;
+    hasFetchedRef.current = true;
+
     usersApi.getOnlineUsers()
       .then(({ data }) => {
         if (data.users?.length > 0) {
-          // Merge with socket list — socket list is more up to date
-          // but REST gives us users who may not have emitted yet
           setOnlineUsers(data.users);
         }
       })
       .catch((err) => console.warn('getOnlineUsers REST error:', err.message));
   }, []);
 
-  // Real-time updates via socket
+  // FIX: Real-time socket updates — always register on mount
   useEffect(() => {
-    const onOnlineUsers = (users) => setOnlineUsers(users);
+    const onOnlineUsers = (users) => {
+      setOnlineUsers(users);
+    };
+
+    // Remove any stale listener first
     socket.off('online_users', onOnlineUsers);
     socket.on('online_users', onOnlineUsers);
-    return () => socket.off('online_users', onOnlineUsers);
+
+    // FIX: Also request fresh list from server on mount via socket
+    // This triggers a broadcastOnline on the backend so we get the current list
+    socket.emit('ping');
+
+    return () => {
+      socket.off('online_users', onOnlineUsers);
+    };
   }, [socket, setOnlineUsers]);
 
   const updateStatus = useCallback((status) => {

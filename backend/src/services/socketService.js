@@ -33,8 +33,8 @@ const setupSocketHandlers = (io) => {
     }
 
     onlineUsers.set(uid, { uid, displayName, avatar, socketId: socket.id, status: currentStatus });
+    // FIX: broadcast to everyone including the new user so they see the full list
     broadcastOnline(io);
-    socket.emit('online_users', Array.from(onlineUsers.values()));
 
     // ── Status update — save to Firestore AND broadcast ───────────────────────
     socket.on('update_status', async ({ status }) => {
@@ -42,7 +42,6 @@ const setupSocketHandlers = (io) => {
         const db = getDb();
         const now = new Date().toISOString();
         await db.collection('users').doc(uid).update({ currentStatus: status, statusUpdatedAt: now });
-        // Also write history
         await db.collection('statusHistory').add({ uid, displayName, status, timestamp: now });
       } catch (err) {
         console.error('update_status Firestore error:', err.message);
@@ -160,13 +159,11 @@ const setupSocketHandlers = (io) => {
       if (t) io.to(t.socketId).emit('direct_call_ended', { fromUid: uid });
     });
 
-    // Direct call media state
     socket.on('direct_media_state', ({ targetUid, audioEnabled, videoEnabled, screenSharing }) => {
       const t = onlineUsers.get(targetUid);
       if (t) io.to(t.socketId).emit('direct_peer_media_state', { uid, audioEnabled, videoEnabled, screenSharing });
     });
 
-    // Direct call chat — ONLY emit to target, sender adds locally in hook
     socket.on('direct_chat_message', ({ targetUid, message }) => {
       const t = onlineUsers.get(targetUid);
       if (!t || !message?.trim()) return;
@@ -175,10 +172,15 @@ const setupSocketHandlers = (io) => {
         message: message.trim(),
         timestamp: new Date().toISOString(),
       };
-      // Only send to target — sender adds it locally to avoid duplicate
       io.to(t.socketId).emit('direct_chat_message', msgData);
-      // Echo back to sender with same id so both have it
       socket.emit('direct_chat_message', msgData);
+    });
+
+    // ── FIX: ping handler — respond with pong AND send current online list ─────
+    socket.on('ping', () => {
+      socket.emit('pong', { timestamp: Date.now() });
+      // Send the requester the current online list immediately
+      socket.emit('online_users', Array.from(onlineUsers.values()));
     });
 
     // ── Disconnect ─────────────────────────────────────────────────────────────
@@ -188,8 +190,6 @@ const setupSocketHandlers = (io) => {
       broadcastOnline(io);
       await handleLeave(socket, io);
     });
-
-    socket.on('ping', () => socket.emit('pong', { timestamp: Date.now() }));
   });
 };
 

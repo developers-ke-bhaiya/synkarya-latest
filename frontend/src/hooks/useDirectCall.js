@@ -37,19 +37,37 @@ export const useDirectCall = () => {
   const pcRef = useRef(null);
   const localStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
+  // FIX: stable ref for remoteStream so ontrack always updates the same object
+  const remoteStreamRef = useRef(null);
 
+  // FIX: setupPC keeps a persistent remoteStream ref, ontrack updates it stably
   const setupPC = useCallback((peerUid) => {
     const pc = createPeerConnection();
     pcRef.current = pc;
+
     const remoteStream = new MediaStream();
+    remoteStreamRef.current = remoteStream;
 
     pc.ontrack = ({ track }) => {
-      remoteStream.addTrack(track);
+      const rs = remoteStreamRef.current;
+      if (!rs) return;
+      // Avoid adding duplicate tracks
+      if (!rs.getTracks().find(t => t.id === track.id)) {
+        rs.addTrack(track);
+      }
+      // Force React re-render by spreading state
       useOnlineStore.setState((s) => ({
         activeDirectCall: s.activeDirectCall
-          ? { ...s.activeDirectCall, remoteStream: new MediaStream(remoteStream.getTracks()) }
+          ? { ...s.activeDirectCall, remoteStream: rs }
           : s.activeDirectCall,
       }));
+      track.onended = () => {
+        useOnlineStore.setState((s) => ({
+          activeDirectCall: s.activeDirectCall
+            ? { ...s.activeDirectCall, remoteStream: rs }
+            : s.activeDirectCall,
+        }));
+      };
     };
 
     pc.onicecandidate = ({ candidate }) => {
@@ -63,6 +81,16 @@ export const useDirectCall = () => {
     return { pc, remoteStream };
   }, [socket]);
 
+  // FIX: getUserMedia with proper fallback
+  const getMedia = useCallback(async () => {
+    try {
+      return await getUserMedia({ video: true, audio: true });
+    } catch (err) {
+      console.warn('Camera+mic failed, trying mic only:', err.name);
+      return await getUserMedia({ video: false, audio: true });
+    }
+  }, []);
+
   const requestCall = useCallback((targetUid, targetName, targetAvatar) => {
     socket.emit('direct_call_request', { targetUid });
     setDirectCallStatus('calling');
@@ -73,17 +101,24 @@ export const useDirectCall = () => {
     clearIncomingCall();
     setDirectCallStatus('connected');
     try {
-      const stream = await getUserMedia({ video: true, audio: true });
+      const stream = await getMedia();
       localStreamRef.current = stream;
       const { pc, remoteStream } = setupPC(fromUid);
       stream.getTracks().forEach((t) => pc.addTrack(t, stream));
-      setActiveDirectCall({ peerUid: fromUid, peerName: fromDisplayName, peerAvatar: fromAvatar, localStream: stream, remoteStream, pc });
+      setActiveDirectCall({
+        peerUid: fromUid,
+        peerName: fromDisplayName,
+        peerAvatar: fromAvatar,
+        localStream: stream,
+        remoteStream,
+        pc,
+      });
       socket.emit('direct_call_accept', { targetUid: fromUid });
     } catch (err) {
       console.error('acceptCall error:', err);
       rejectCall(fromUid);
     }
-  }, [clearIncomingCall, setDirectCallStatus, setActiveDirectCall, setupPC, socket]);
+  }, [clearIncomingCall, setDirectCallStatus, setActiveDirectCall, setupPC, socket, getMedia]);
 
   const rejectCall = useCallback((fromUid) => {
     socket.emit('direct_call_reject', { targetUid: fromUid });
@@ -97,6 +132,7 @@ export const useDirectCall = () => {
     if (screenStreamRef.current) { stopStream(screenStreamRef.current); screenStreamRef.current = null; }
     if (localStreamRef.current) { stopStream(localStreamRef.current); localStreamRef.current = null; }
     if (pcRef.current) { try { pcRef.current.close(); } catch {} pcRef.current = null; }
+    remoteStreamRef.current = null;
     clearActiveDirectCall();
   }, [socket, clearActiveDirectCall]);
 
@@ -117,7 +153,6 @@ export const useDirectCall = () => {
     if (localStreamRef.current) {
       localStreamRef.current.getVideoTracks().forEach((t) => { t.enabled = newState; });
     }
-    // Update local stream reference so VideoBox re-renders
     useOnlineStore.setState((s) => ({
       activeDirectCall: s.activeDirectCall
         ? { ...s.activeDirectCall, localStream: localStreamRef.current ? new MediaStream(localStreamRef.current.getTracks()) : null }
@@ -156,7 +191,6 @@ export const useDirectCall = () => {
     }
   }, [directAudioEnabled, directVideoEnabled, setDirectScreenSharing, socket]);
 
-  // Send direct message — add locally immediately, backend echoes to peer only
   const sendDirectMessage = useCallback((message) => {
     const { activeDirectCall } = useOnlineStore.getState();
     if (!activeDirectCall?.peerUid || !message?.trim()) return;
@@ -168,12 +202,10 @@ export const useDirectCall = () => {
       message: message.trim(),
       timestamp: new Date().toISOString(),
     };
-    // Add locally immediately — no duplicate from server
     addDirectMessage(msgData);
     socket.emit('direct_chat_message', { targetUid: activeDirectCall.peerUid, message: message.trim() });
   }, [socket, addDirectMessage]);
 
-  // ── Socket listeners — registered ONCE ────────────────────────────────────
   useEffect(() => {
     const onIncoming = ({ fromUid, fromDisplayName, fromAvatar }) => {
       playNotificationSound();
@@ -183,7 +215,7 @@ export const useDirectCall = () => {
     const onAccepted = async ({ fromUid, fromDisplayName }) => {
       setDirectCallStatus('connected');
       try {
-        const stream = await getUserMedia({ video: true, audio: true });
+        const stream = await getMedia();
         localStreamRef.current = stream;
         const { pc, remoteStream } = setupPC(fromUid);
         stream.getTracks().forEach((t) => pc.addTrack(t, stream));
@@ -191,10 +223,11 @@ export const useDirectCall = () => {
         useOnlineStore.setState((s) => ({
           activeDirectCall: s.activeDirectCall
             ? { ...s.activeDirectCall, localStream: stream, remoteStream, pc }
-            : s.activeDirectCall,
+            : { peerUid: fromUid, peerName: fromDisplayName, peerAvatar: null, localStream: stream, remoteStream, pc },
         }));
 
-        const offer = await pc.createOffer();
+        // FIX: explicitly request receiving audio+video
+        const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
         await pc.setLocalDescription(offer);
         socket.emit('direct_offer', { targetUid: fromUid, offer: pc.localDescription });
       } catch (err) {
@@ -225,14 +258,16 @@ export const useDirectCall = () => {
 
     const onDirectIce = async ({ candidate }) => {
       const pc = pcRef.current;
-      if (!pc) return;
-      try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
+      if (!pc || !candidate) return;
+      try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); }
+      catch (err) { if (!err.message?.includes('Unknown ufrag')) console.error('ICE error:', err); }
     };
 
     const onCallEnded = () => {
       if (screenStreamRef.current) { stopStream(screenStreamRef.current); screenStreamRef.current = null; }
       if (localStreamRef.current) { stopStream(localStreamRef.current); localStreamRef.current = null; }
       if (pcRef.current) { try { pcRef.current.close(); } catch {} pcRef.current = null; }
+      remoteStreamRef.current = null;
       clearActiveDirectCall();
     };
 
@@ -240,10 +275,8 @@ export const useDirectCall = () => {
       setPeerMediaState(uid, { audioEnabled, videoEnabled, screenSharing });
     };
 
-    // Only receive messages FROM peer (we add our own locally in sendDirectMessage)
     const onDirectChat = (msg) => {
       const { user } = require('../store/authStore').useAuthStore.getState();
-      // Ignore echo of our own messages (we already added them locally)
       if (msg.uid === user?.uid) return;
       addDirectMessage(msg);
     };
@@ -279,7 +312,7 @@ export const useDirectCall = () => {
       socket.off('direct_peer_media_state', onPeerMedia);
       socket.off('direct_chat_message', onDirectChat);
     };
-  }, [socket, setupPC]);
+  }, [socket, setupPC, getMedia]);
 
   return {
     requestCall, acceptCall, rejectCall, endDirectCall,

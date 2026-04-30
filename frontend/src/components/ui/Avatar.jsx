@@ -17,8 +17,8 @@ const getColor = (name = '') => {
 
 export const Avatar = ({ name = '', size = 'md', className = '' }) => {
   const sizes = {
-    xs: 'w-6 h-6 text-xs',
-    sm: 'w-8 h-8 text-sm',
+    xs: 'w-5 h-5 text-[9px]',
+    sm: 'w-8 h-8 text-xs',
     md: 'w-10 h-10 text-sm',
     lg: 'w-12 h-12 text-base',
     xl: 'w-16 h-16 text-lg',
@@ -27,7 +27,8 @@ export const Avatar = ({ name = '', size = 'md', className = '' }) => {
   return (
     <div
       className={`${sizes[size]} rounded-full bg-gradient-to-br ${getColor(name)}
-        flex items-center justify-center font-bold text-white flex-shrink-0 ${className}`}
+        flex items-center justify-center font-bold text-white flex-shrink-0 select-none ${className}`}
+      style={{ fontFamily: 'Syne, sans-serif' }}
     >
       {getInitials(name)}
     </div>
