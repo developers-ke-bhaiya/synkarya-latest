@@ -16,6 +16,9 @@ export const useWebRTC = () => {
 
   const localStreamRef = useRef(null);
   const makingOfferRef = useRef(new Set());
+  // FIX: per-peer ICE candidate queues & remoteDesc flags
+  const iceCandidateQueues = useRef(new Map()); // uid → candidate[]
+  const remoteDescSet = useRef(new Map()); // uid → bool
   const socket = getSocket();
 
   const initLocalStream = useCallback(async () => {
@@ -35,6 +38,15 @@ export const useWebRTC = () => {
     }
   }, [setLocalStream, setVideoEnabled]);
 
+  // FIX: flush queued ICE candidates for a peer
+  const flushIce = useCallback(async (uid, pc) => {
+    const queue = iceCandidateQueues.current.get(uid) || [];
+    iceCandidateQueues.current.set(uid, []);
+    for (const c of queue) {
+      try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
+    }
+  }, []);
+
   const createPeer = useCallback((remoteUid, remoteDisplayName) => {
     const stream = localStreamRef.current;
     if (!stream) return null;
@@ -45,12 +57,19 @@ export const useWebRTC = () => {
     const pc = createPeerConnection();
     addStreamToPeer(pc, stream);
 
+    // FIX: use a STABLE remoteStream ref per peer — never create new MediaStream on each track
     const remoteStream = new MediaStream();
     setRemoteStream(remoteUid, remoteStream);
 
     pc.ontrack = ({ track }) => {
-      remoteStream.addTrack(track);
-      setRemoteStream(remoteUid, new MediaStream(remoteStream.getTracks()));
+      // Add track to the same stream object — this keeps VideoTile's srcObject valid
+      const existingStream = useCallStore.getState().remoteStreams.get(remoteUid);
+      const target = existingStream || remoteStream;
+      if (!target.getTracks().find(t => t.id === track.id)) {
+        target.addTrack(track);
+      }
+      // Trigger re-render by updating store with SAME stream reference
+      setRemoteStream(remoteUid, target);
     };
 
     pc.onicecandidate = ({ candidate }) => {
@@ -68,8 +87,14 @@ export const useWebRTC = () => {
         removePeerConnection(remoteUid);
         removeRemoteStream(remoteUid);
         removePeerInfo(remoteUid);
+        iceCandidateQueues.current.delete(remoteUid);
+        remoteDescSet.current.delete(remoteUid);
       }
     };
+
+    // Init ICE queue for this peer
+    if (!iceCandidateQueues.current.has(remoteUid)) iceCandidateQueues.current.set(remoteUid, []);
+    remoteDescSet.current.set(remoteUid, false);
 
     addPeerConnection(remoteUid, pc);
     setPeerInfo(remoteUid, { displayName: remoteDisplayName });
@@ -112,6 +137,9 @@ export const useWebRTC = () => {
           makingOfferRef.current.delete(fromUid);
         }
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        remoteDescSet.current.set(fromUid, true);
+        await flushIce(fromUid, pc);
+
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         socket.emit('answer', { targetUid: fromUid, answer: pc.localDescription, roomId: currentRoom?.roomId });
@@ -121,32 +149,47 @@ export const useWebRTC = () => {
     const onAnswer = async ({ answer, fromUid }) => {
       const pc = useCallStore.getState().peerConnections.get(fromUid);
       if (!pc || pc.signalingState !== 'have-local-offer') return;
-      try { await pc.setRemoteDescription(new RTCSessionDescription(answer)); }
-      catch (err) { console.error('onAnswer error:', err); }
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+        remoteDescSet.current.set(fromUid, true);
+        await flushIce(fromUid, pc);
+      } catch (err) { console.error('onAnswer error:', err); }
     };
 
+    // FIX: queue ICE if remoteDescription not set yet
     const onIce = async ({ candidate, fromUid }) => {
       const pc = useCallStore.getState().peerConnections.get(fromUid);
       if (!pc || pc.signalingState === 'closed') return;
-      try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); }
-      catch (err) { if (!err.message?.includes('Unknown ufrag')) console.error('ICE error:', err); }
+      if (remoteDescSet.current.get(fromUid)) {
+        try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); }
+        catch (err) { if (!err.message?.includes('Unknown ufrag')) console.error('ICE error:', err); }
+      } else {
+        const q = iceCandidateQueues.current.get(fromUid) || [];
+        q.push(candidate);
+        iceCandidateQueues.current.set(fromUid, q);
+      }
     };
 
     const onUserLeft = ({ uid }) => {
       removePeerConnection(uid);
       removeRemoteStream(uid);
       removePeerInfo(uid);
+      iceCandidateQueues.current.delete(uid);
+      remoteDescSet.current.delete(uid);
     };
 
     const onPeerMedia = ({ uid, audioEnabled, videoEnabled, screenSharing }) => {
       setPeerInfo(uid, { audioEnabled, videoEnabled, screenSharing });
     };
 
+    // FIX: renegotiate for screen share — properly flush ICE after remoteDesc
     const onRenegotiate = async ({ offer, fromUid }) => {
       const pc = useCallStore.getState().peerConnections.get(fromUid);
       if (!pc) return;
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        remoteDescSet.current.set(fromUid, true);
+        await flushIce(fromUid, pc);
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         socket.emit('renegotiate_answer', { targetUid: fromUid, answer: pc.localDescription, roomId: currentRoom?.roomId });
@@ -182,73 +225,44 @@ export const useWebRTC = () => {
       socket.off('renegotiate_answer', onRenegotiateAnswer);
     };
   }, [socket, currentRoom, createPeer, sendOffer, setPeerInfo,
-      removePeerConnection, removeRemoteStream, removePeerInfo]);
+      removePeerConnection, removeRemoteStream, removePeerInfo, flushIce]);
 
-  // ── FIX: Toggle audio ─────────────────────────────────────────────────────
-  // Simply enable/disable track — no replaceTrack needed for audio
   const toggleAudio = useCallback(() => {
     const newState = !audioEnabled;
-    const stream = localStreamRef.current;
-    if (stream) {
-      stream.getAudioTracks().forEach((t) => { t.enabled = newState; });
-    }
+    localStreamRef.current?.getAudioTracks().forEach(t => { t.enabled = newState; });
     setAudioEnabled(newState);
-    socket.emit('media_state', {
-      roomId: currentRoom?.roomId,
-      audioEnabled: newState, videoEnabled, screenSharing: isScreenSharing,
-    });
+    socket.emit('media_state', { roomId: currentRoom?.roomId, audioEnabled: newState, videoEnabled, screenSharing: isScreenSharing });
   }, [audioEnabled, videoEnabled, isScreenSharing, setAudioEnabled, socket, currentRoom]);
 
-  // ── FIX: Toggle video ─────────────────────────────────────────────────────
-  // Use replaceTrack so remote peer sees the change immediately
   const toggleVideo = useCallback(async () => {
     const newState = !videoEnabled;
     const stream = localStreamRef.current;
-
     if (!stream) return;
 
     if (!newState) {
-      // Turning OFF — disable track
-      stream.getVideoTracks().forEach((t) => { t.enabled = false; });
+      stream.getVideoTracks().forEach(t => { t.enabled = false; });
     } else {
-      // Turning ON — re-enable existing track
-      const videoTracks = stream.getVideoTracks();
-      if (videoTracks.length > 0) {
-        videoTracks.forEach((t) => { t.enabled = true; });
+      const tracks = stream.getVideoTracks();
+      if (tracks.length > 0) {
+        tracks.forEach(t => { t.enabled = true; });
       } else {
-        // No video track exists (started audio-only) — get camera fresh
         try {
           const camStream = await getUserMedia({ video: true, audio: false });
           const camTrack = camStream.getVideoTracks()[0];
           stream.addTrack(camTrack);
           localStreamRef.current = stream;
           setLocalStream(stream);
-
-          // Add track to all existing peer connections
           const allPeers = useCallStore.getState().peerConnections;
-          for (const [peerUid, pc] of allPeers) {
-            try {
-              pc.addTrack(camTrack, stream);
-            } catch {}
-          }
-        } catch (err) {
-          console.error('Failed to get camera:', err);
-          return;
-        }
+          for (const [, pc] of allPeers) { try { pc.addTrack(camTrack, stream); } catch {} }
+        } catch (err) { console.error('Failed to get camera:', err); return; }
       }
     }
-
     setVideoEnabled(newState);
-    // Update local stream reference in store so VideoTile re-renders
     setLocalStream(new MediaStream(stream.getTracks()));
-
-    socket.emit('media_state', {
-      roomId: currentRoom?.roomId,
-      audioEnabled, videoEnabled: newState, screenSharing: isScreenSharing,
-    });
+    socket.emit('media_state', { roomId: currentRoom?.roomId, audioEnabled, videoEnabled: newState, screenSharing: isScreenSharing });
   }, [audioEnabled, videoEnabled, isScreenSharing, setVideoEnabled, setLocalStream, socket, currentRoom]);
 
-  // ── Screen share ───────────────────────────────────────────────────────────
+  // FIX: screen share — use renegotiate signal so receiver gets new track properly
   const startScreenShare = useCallback(async () => {
     try {
       const screenStream = await getDisplayMedia();
@@ -256,12 +270,17 @@ export const useWebRTC = () => {
       setScreenStream(screenStream);
 
       const allPeers = useCallStore.getState().peerConnections;
-      await Promise.all(Array.from(allPeers.values()).map((pc) => replaceTrackOnPeer(pc, screenTrack)));
+      for (const [peerUid, pc] of allPeers) {
+        await replaceTrackOnPeer(pc, screenTrack);
+        // FIX: renegotiate after replacing track so remote side updates
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          socket.emit('renegotiate', { targetUid: peerUid, offer: pc.localDescription, roomId: currentRoom?.roomId });
+        } catch {}
+      }
 
-      socket.emit('media_state', {
-        roomId: currentRoom?.roomId, audioEnabled, videoEnabled: true, screenSharing: true,
-      });
-
+      socket.emit('media_state', { roomId: currentRoom?.roomId, audioEnabled, videoEnabled: true, screenSharing: true });
       screenTrack.onended = () => stopScreenShare();
       return true;
     } catch (err) {
@@ -278,12 +297,16 @@ export const useWebRTC = () => {
     if (cameraTrack) {
       cameraTrack.enabled = true;
       const allPeers = useCallStore.getState().peerConnections;
-      await Promise.all(Array.from(allPeers.values()).map((pc) => replaceTrackOnPeer(pc, cameraTrack)));
+      for (const [peerUid, pc] of allPeers) {
+        await replaceTrackOnPeer(pc, cameraTrack);
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          socket.emit('renegotiate', { targetUid: peerUid, offer: pc.localDescription, roomId: currentRoom?.roomId });
+        } catch {}
+      }
     }
-
-    socket.emit('media_state', {
-      roomId: currentRoom?.roomId, audioEnabled, videoEnabled, screenSharing: false,
-    });
+    socket.emit('media_state', { roomId: currentRoom?.roomId, audioEnabled, videoEnabled, screenSharing: false });
   }, [socket, currentRoom, audioEnabled, videoEnabled, setScreenStream]);
 
   const endCall = useCallback(() => {
