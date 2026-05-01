@@ -1,10 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const { verifyToken } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
 const { getDb } = require('../config/firebase');
 
 // GET /api/analytics/work-summary?startDate=&endDate=
-router.get('/work-summary', verifyToken, async (req, res) => {
+router.get('/work-summary', authenticate, async (req, res) => {
   try {
     const db = getDb();
     const { startDate, endDate, uid } = req.query;
@@ -44,7 +44,7 @@ router.get('/work-summary', verifyToken, async (req, res) => {
 });
 
 // GET /api/analytics/status-timeline?startDate=&endDate=&uid=
-router.get('/status-timeline', verifyToken, async (req, res) => {
+router.get('/status-timeline', authenticate, async (req, res) => {
   try {
     const db = getDb();
     const { startDate, endDate, uid } = req.query;
