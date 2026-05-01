@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Zap, Hash, Plus, Search, LogOut, Globe, Lock, ChevronRight, ClipboardList, RefreshCw,
+  Zap, Hash, Plus, Search, LogOut, Globe, Lock, ChevronRight, ClipboardList, RefreshCw, BarChart2,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../../store/authStore';
@@ -126,6 +126,12 @@ export const Sidebar = ({ onRoomJoined }) => {
             <ClipboardList size={12} className="text-slate-400" />
           </div>
           <span className="text-sm">Attendance</span>
+        </button>
+        <button onClick={() => navigate('/analytics')} className="sidebar-item w-full text-left">
+          <div className="w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0" style={{ background: 'rgba(99,102,241,0.15)' }}>
+            <BarChart2 size={12} style={{ color: '#818cf8' }} />
+          </div>
+          <span className="text-sm">Analytics</span>
         </button>
       </div>
 

@@ -8,21 +8,19 @@ export const useChat = () => {
   const typingTimerRef = useRef(null);
 
   const loadHistory = useCallback(async (roomId) => {
+    if (!roomId) return;
     try {
       const { data } = await messagesApi.getRoomMessages(roomId);
       setMessages(data.messages || []);
     } catch (err) {
-      console.error('Failed to load history:', err);
+      console.error('loadHistory error:', err);
       setMessages([]);
     }
   }, [setMessages]);
 
-  // FIX: sendMessage reads roomId at call time from param — never from stale closure
   const sendMessage = useCallback((roomId, message, fileData = null) => {
-    if ((!message?.trim() && !fileData) || !roomId) {
-      console.warn('[Chat] sendMessage called without roomId or message', { roomId, message });
-      return;
-    }
+    if (!roomId) { console.error('[Chat] sendMessage: no roomId'); return; }
+    if (!message?.trim() && !fileData) return;
     const socket = getSocket();
     socket.emit('chat_message', {
       roomId,
@@ -45,16 +43,16 @@ export const useChat = () => {
     }
   }, []);
 
-  // Register socket listeners once for app lifetime
+  // Register socket listeners ONCE — mount only
   useEffect(() => {
     const socket = getSocket();
-
     const onMessage = (msg) => addMessage(msg);
     const onTyping = ({ uid, displayName, isTyping }) => {
       setTyping(uid, displayName, isTyping);
       if (isTyping) setTimeout(() => setTyping(uid, displayName, false), 4000);
     };
 
+    // Remove before adding — prevents duplicate on StrictMode double-mount
     socket.off('chat_message', onMessage);
     socket.off('user_typing', onTyping);
     socket.on('chat_message', onMessage);
@@ -65,7 +63,8 @@ export const useChat = () => {
       socket.off('user_typing', onTyping);
       clearTimeout(typingTimerRef.current);
     };
-  }, [addMessage, setTyping]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // MOUNT ONCE
 
   return { sendMessage, sendTyping, loadHistory };
 };

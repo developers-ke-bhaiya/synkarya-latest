@@ -54,3 +54,8 @@ export const usersApi = {
 };
 
 export default api;
+
+export const analyticsApi = {
+  getWorkSummary: (params) => api.get('/analytics/work-summary', { params }),
+  getStatusTimeline: (params) => api.get('/analytics/status-timeline', { params }),
+};

@@ -4,6 +4,7 @@ import { LoginPage } from './components/auth/LoginPage';
 import { RegisterPage } from './components/auth/RegisterPage';
 import { CallPage } from './pages/CallPage';
 import { MyAttendancePage } from './pages/MyAttendancePage';
+import { AnalyticsPage } from './pages/AnalyticsPage';
 import { ToastProvider } from './components/ui/Toast';
 import { useAuthStore } from './store/authStore';
 
@@ -25,6 +26,7 @@ export default function App() {
         <Route path="/register" element={<PublicRoute><RegisterPage /></PublicRoute>} />
         <Route path="/" element={<ProtectedRoute><CallPage /></ProtectedRoute>} />
         <Route path="/attendance" element={<ProtectedRoute><MyAttendancePage /></ProtectedRoute>} />
+        <Route path="/analytics" element={<ProtectedRoute><AnalyticsPage /></ProtectedRoute>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </ToastProvider>

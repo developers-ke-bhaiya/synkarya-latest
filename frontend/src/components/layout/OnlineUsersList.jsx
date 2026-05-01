@@ -1,74 +1,180 @@
-import React, { useState } from 'react';
-import { Phone, Users, Circle } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { Phone, Users, Circle, MessageSquare, X, Send, ArrowLeft } from 'lucide-react';
 import { useOnlineStore } from '../../store/onlineStore';
 import { useAuthStore } from '../../store/authStore';
 import { useDirectCall } from '../../hooks/useDirectCall';
 import { Avatar } from '../ui/Avatar';
+import { formatMessageTime } from '../../utils/formatters';
+import { getSocket } from '../../services/socket';
 
-export const OnlineUsersList = ({ onClose }) => {
-  const { onlineUsers, directCallStatus } = useOnlineStore();
+// ── Per-user DM chat using socket ─────────────────────────────────────────────
+const DMChat = ({ peer, onBack }) => {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
   const { user } = useAuthStore();
-  const { requestCall } = useDirectCall();
-  const [callingUid, setCallingUid] = useState(null);
+  const endRef = useRef(null);
 
-  const others = onlineUsers.filter((u) => u.uid !== user?.uid);
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
-  const handleCall = (u) => {
-    if (directCallStatus || callingUid) return;
-    setCallingUid(u.uid);
-    requestCall(u.uid, u.displayName, u.avatar);
-    setTimeout(() => setCallingUid(null), 5000);
+  useEffect(() => {
+    const socket = getSocket();
+    const onMsg = (msg) => {
+      if (msg.uid === peer.uid || msg.uid === user?.uid) {
+        setMessages(prev => {
+          if (prev.find(m => m.id === msg.id)) return prev;
+          return [...prev, msg];
+        });
+      }
+    };
+    socket.on('direct_chat_message', onMsg);
+    return () => socket.off('direct_chat_message', onMsg);
+  }, [peer.uid, user?.uid]);
+
+  const send = () => {
+    if (!input.trim()) return;
+    const socket = getSocket();
+    const msg = {
+      id: Date.now().toString(),
+      uid: user?.uid,
+      displayName: user?.displayName,
+      message: input.trim(),
+      timestamp: new Date().toISOString(),
+    };
+    setMessages(prev => [...prev, msg]);
+    socket.emit('direct_chat_message', { targetUid: peer.uid, message: input.trim() });
+    setInput('');
   };
 
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div
-        className="flex items-center justify-between px-4 py-3 flex-shrink-0"
-        style={{ borderBottom: '1px solid var(--border)' }}
-      >
+      <div className="flex items-center gap-3 px-3 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+        <button onClick={onBack}
+          className="w-7 h-7 rounded-lg flex items-center justify-center transition-all"
+          style={{ color: 'var(--text-muted)', background: 'rgba(255,255,255,0.05)' }}
+          onMouseEnter={e => e.currentTarget.style.color = 'white'}
+          onMouseLeave={e => e.currentTarget.style.color = 'var(--text-muted)'}>
+          <ArrowLeft size={14} />
+        </button>
+        <div className="relative">
+          <Avatar name={peer.displayName} size="sm" />
+          <div className="online-dot" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="font-semibold text-white text-sm truncate" style={{ fontFamily: 'Syne, sans-serif' }}>{peer.displayName}</p>
+          <p className="text-xs" style={{ color: 'var(--success)' }}>Online</p>
+        </div>
+      </div>
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto p-3 space-y-2 min-h-0">
+        {messages.length === 0 && (
+          <div className="text-center pt-8 px-4">
+            <MessageSquare size={24} className="mx-auto mb-2 opacity-20" />
+            <p className="text-xs" style={{ color: 'var(--text-muted)' }}>Start a conversation with {peer.displayName}</p>
+          </div>
+        )}
+        {messages.map(m => {
+          const isMe = m.uid === user?.uid;
+          return (
+            <div key={m.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}>
+              <div className={`max-w-[85%] px-3 py-2 rounded-2xl text-sm break-words ${isMe ? 'bg-amber-400/20 text-amber-50 rounded-tr-sm' : 'bg-white/6 text-slate-200 rounded-tl-sm'}`}>
+                <p>{m.message}</p>
+                <p className={`text-[10px] mt-1 ${isMe ? 'text-amber-400/50' : 'text-slate-600'}`}>
+                  {formatMessageTime(m.timestamp)}
+                </p>
+              </div>
+            </div>
+          );
+        })}
+        <div ref={endRef} />
+      </div>
+
+      {/* Input */}
+      <div className="p-3 flex-shrink-0" style={{ borderTop: '1px solid var(--border)' }}>
+        <div className="flex gap-2">
+          <input
+            className="input-field flex-1 py-2 text-sm"
+            placeholder={`Message ${peer.displayName}...`}
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') send(); }}
+          />
+          <button onClick={send} disabled={!input.trim()}
+            className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-all disabled:opacity-30"
+            style={{ background: 'var(--accent)' }}>
+            <Send size={14} style={{ color: '#0b0e14' }} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── Main OnlineUsersList ───────────────────────────────────────────────────────
+export const OnlineUsersList = ({ onClose }) => {
+  const { onlineUsers, directCallStatus } = useOnlineStore();
+  const { user } = useAuthStore();
+  const { requestCall } = useDirectCall();
+  const [callingUid, setCallingUid] = useState(null);
+  const [dmPeer, setDmPeer] = useState(null); // { uid, displayName }
+
+  const others = onlineUsers.filter(u => u.uid !== user?.uid);
+
+  const handleCall = (u) => {
+    if (directCallStatus || callingUid) return;
+    setCallingUid(u.uid);
+    requestCall(u.uid, u.displayName, u.avatar);
+    setTimeout(() => setCallingUid(null), 8000);
+  };
+
+  if (dmPeer) return <DMChat peer={dmPeer} onBack={() => setDmPeer(null)} />;
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 flex-shrink-0"
+        style={{ borderBottom: '1px solid var(--border)' }}>
         <div className="flex items-center gap-2">
           <Users size={13} className="text-slate-500" />
-          <span className="font-bold text-white text-xs uppercase tracking-widest" style={{ fontFamily: 'Syne, sans-serif' }}>
-            Online
-          </span>
+          <span className="font-bold text-white text-xs uppercase tracking-widest" style={{ fontFamily: 'Syne, sans-serif' }}>Online</span>
           {others.length > 0 && (
-            <span className="flex items-center gap-1 bg-emerald-500/10 border border-emerald-500/20 rounded-full px-1.5 py-0.5">
+            <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-full"
+              style={{ background: 'var(--success-dim)', border: '1px solid rgba(16,185,129,0.2)' }}>
               <Circle size={5} className="text-emerald-400 fill-emerald-400" />
               <span className="text-xs text-emerald-400 font-bold">{others.length}</span>
             </span>
           )}
         </div>
         {onClose && (
-          <button
-            onClick={onClose}
-            className="text-xs text-slate-600 hover:text-slate-300 transition-colors px-2 py-1 rounded-lg hover:bg-white/5"
-          >
-            Close
+          <button onClick={onClose}
+            className="w-6 h-6 rounded-lg flex items-center justify-center transition-all text-slate-500 hover:text-white"
+            style={{ background: 'rgba(255,255,255,0.04)' }}>
+            <X size={12} />
           </button>
         )}
       </div>
 
       {/* List */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto min-h-0">
         {others.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-10 px-4 text-center gap-3">
             <div className="w-10 h-10 rounded-2xl flex items-center justify-center" style={{ background: 'var(--bg-elevated)' }}>
               <Users size={17} className="text-slate-600" />
             </div>
             <div>
-              <p className="text-sm text-slate-500 font-medium">No one else online</p>
-              <p className="text-xs text-slate-700 mt-0.5">Invite teammates to collaborate</p>
+              <p className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>No one else online</p>
+              <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>Invite teammates to collaborate</p>
             </div>
           </div>
         ) : (
           <div className="p-2 space-y-0.5">
-            {others.map((u) => (
-              <div
-                key={u.uid}
-                className="flex items-center gap-2.5 px-2.5 py-2.5 rounded-xl transition-all group cursor-default hover:bg-white/4"
-              >
-                {/* Avatar + online dot */}
+            {others.map(u => (
+              <div key={u.uid}
+                className="flex items-center gap-2.5 px-2.5 py-2.5 rounded-xl transition-all group hover:bg-white/3 cursor-default">
+                {/* Avatar + dot */}
                 <div className="relative flex-shrink-0">
                   <Avatar name={u.displayName} size="sm" />
                   <div className="online-dot" />
@@ -76,70 +182,58 @@ export const OnlineUsersList = ({ onClose }) => {
 
                 {/* Info */}
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-white truncate leading-tight">
-                    {u.displayName}
-                  </p>
+                  <p className="text-sm font-semibold text-white truncate">{u.displayName}</p>
                   {u.status ? (
-                    <p className="text-xs truncate mt-0.5 flex items-center gap-1" style={{ color: 'var(--accent)' }}>
-                      <span className="opacity-70">🎯</span>
-                      <span className="truncate opacity-80">{u.status}</span>
+                    <p className="text-xs truncate mt-0.5" style={{ color: 'var(--accent)', opacity: 0.8 }}>
+                      🎯 {u.status}
                     </p>
                   ) : (
                     <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>Available</p>
                   )}
                 </div>
 
-                {/* Call button — visible on hover */}
-                <button
-                  onClick={() => handleCall(u)}
-                  disabled={!!directCallStatus || !!callingUid}
-                  title={`Call ${u.displayName}`}
-                  className="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0 transition-all duration-200 opacity-0 group-hover:opacity-100 disabled:opacity-20 disabled:cursor-not-allowed"
-                  style={{
-                    background: 'var(--success-dim)',
-                    color: 'var(--success)',
-                    border: '1px solid rgba(16,185,129,0.2)',
-                  }}
-                  onMouseEnter={e => {
-                    if (!directCallStatus && !callingUid) {
-                      e.currentTarget.style.background = 'var(--success)';
-                      e.currentTarget.style.color = '#fff';
-                      e.currentTarget.style.boxShadow = '0 4px 12px rgba(16,185,129,0.3)';
-                    }
-                  }}
-                  onMouseLeave={e => {
-                    e.currentTarget.style.background = 'var(--success-dim)';
-                    e.currentTarget.style.color = 'var(--success)';
-                    e.currentTarget.style.boxShadow = 'none';
-                  }}
-                >
-                  {callingUid === u.uid ? (
-                    <div className="w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                  ) : (
-                    <Phone size={13} />
-                  )}
-                </button>
+                {/* Action buttons — visible on hover */}
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  {/* DM button */}
+                  <button onClick={() => setDmPeer({ uid: u.uid, displayName: u.displayName })}
+                    title={`Message ${u.displayName}`}
+                    className="w-7 h-7 rounded-lg flex items-center justify-center transition-all"
+                    style={{ background: 'rgba(99,102,241,0.15)', color: '#818cf8', border: '1px solid rgba(99,102,241,0.2)' }}
+                    onMouseEnter={e => { e.currentTarget.style.background = '#6366f1'; e.currentTarget.style.color = '#fff'; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = 'rgba(99,102,241,0.15)'; e.currentTarget.style.color = '#818cf8'; }}>
+                    <MessageSquare size={12} />
+                  </button>
+
+                  {/* Call button */}
+                  <button onClick={() => handleCall(u)}
+                    disabled={!!directCallStatus || !!callingUid}
+                    title={`Call ${u.displayName}`}
+                    className="w-7 h-7 rounded-lg flex items-center justify-center transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                    style={{ background: 'var(--success-dim)', color: 'var(--success)', border: '1px solid rgba(16,185,129,0.2)' }}
+                    onMouseEnter={e => { if (!directCallStatus && !callingUid) { e.currentTarget.style.background = 'var(--success)'; e.currentTarget.style.color = '#fff'; } }}
+                    onMouseLeave={e => { e.currentTarget.style.background = 'var(--success-dim)'; e.currentTarget.style.color = 'var(--success)'; }}>
+                    {callingUid === u.uid
+                      ? <div className="w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                      : <Phone size={12} />}
+                  </button>
+                </div>
               </div>
             ))}
           </div>
         )}
       </div>
 
-      {/* Self status at bottom */}
-      <div
-        className="px-3 py-2.5 flex-shrink-0 flex items-center gap-2"
-        style={{ borderTop: '1px solid var(--border)' }}
-      >
+      {/* Self at bottom */}
+      <div className="px-3 py-2.5 flex-shrink-0 flex items-center gap-2" style={{ borderTop: '1px solid var(--border)' }}>
         <div className="relative flex-shrink-0">
           <Avatar name={user?.displayName || '?'} size="xs" />
-          <div className="online-dot" style={{ width: 8, height: 8 }} />
+          <div className="online-dot" style={{ width: 7, height: 7 }} />
         </div>
-        <div className="min-w-0 flex-1">
-          <p className="text-xs font-medium truncate" style={{ color: 'var(--text-secondary)' }}>
-            {user?.displayName}
-          </p>
-        </div>
-        <span className="text-xs px-1.5 py-0.5 rounded-full" style={{ background: 'var(--success-dim)', color: 'var(--success)', fontSize: '10px' }}>
+        <p className="text-xs font-medium truncate flex-1" style={{ color: 'var(--text-secondary)' }}>
+          {user?.displayName}
+        </p>
+        <span className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold"
+          style={{ background: 'var(--success-dim)', color: 'var(--success)' }}>
           You
         </span>
       </div>

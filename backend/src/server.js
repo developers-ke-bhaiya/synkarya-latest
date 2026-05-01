@@ -10,6 +10,7 @@ const { setupSocketHandlers } = require('./services/socketService');
 
 const authRoutes = require('./routes/auth');
 const roomRoutes = require('./routes/rooms');
+const analyticsRoutes = require('./routes/analytics');
 const attendanceRoutes = require('./routes/attendance');
 const messageRoutes = require('./routes/messages');
 const userRoutes = require('./routes/users');
@@ -64,6 +65,7 @@ app.get('/health', (req, res) => {
 
 app.use('/api/auth', authRoutes);
 app.use('/api/rooms', roomRoutes);
+app.use('/api/analytics', analyticsRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/users', userRoutes);
