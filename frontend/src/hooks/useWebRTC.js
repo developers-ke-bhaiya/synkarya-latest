@@ -13,15 +13,15 @@ export const useWebRTC = () => {
     setAudioEnabled, setVideoEnabled, setScreenStream, cleanupCall,
   } = useCallStore();
 
-  // ALL mutable state in refs — prevents stale closures AND prevents effect re-runs
   const localStreamRef = useRef(null);
   const makingOfferRef = useRef(new Set());
-  const iceQueues = useRef(new Map());     // uid → RTCIceCandidate[]
-  const remoteDescReady = useRef(new Map()); // uid → bool
+  const iceQueues = useRef(new Map());
+  const remoteDescReady = useRef(new Map());
+  // FIX: stable MediaStream refs per peer — never recreate, only add tracks
+  const remoteStreamRefs = useRef(new Map());
 
-  // ── helpers ───────────────────────────────────────────────────────────────
   const getRoomId = () => useCallStore.getState().currentRoom?.roomId;
-  const getSocket$ = () => getSocket();
+  const socket$ = () => getSocket();
 
   const flushIce = async (uid, pc) => {
     const q = iceQueues.current.get(uid) || [];
@@ -33,7 +33,7 @@ export const useWebRTC = () => {
 
   const createPeer = (remoteUid, remoteDisplayName) => {
     const stream = localStreamRef.current;
-    if (!stream) { console.warn('[WebRTC] createPeer called before localStream'); return null; }
+    if (!stream) { console.warn('[WebRTC] No local stream yet'); return null; }
 
     const existing = useCallStore.getState().peerConnections.get(remoteUid);
     if (existing && existing.signalingState !== 'closed') return existing;
@@ -41,32 +41,45 @@ export const useWebRTC = () => {
     const pc = createPeerConnection();
     addStreamToPeer(pc, stream);
 
-    // One stable MediaStream per peer — never replaced, only tracks added
+    // FIX: Create ONE stable MediaStream per peer, store in ref
+    // Never create new MediaStream — only addTrack to the same one
     const remoteStream = new MediaStream();
+    remoteStreamRefs.current.set(remoteUid, remoteStream);
+    // Set in store so VideoGrid renders it
     setRemoteStream(remoteUid, remoteStream);
 
     pc.ontrack = ({ track }) => {
-      const current = useCallStore.getState().remoteStreams.get(remoteUid) || remoteStream;
-      if (!current.getTracks().find(t => t.id === track.id)) current.addTrack(track);
-      // Same object reference — Zustand sees Map mutation, trigger re-render
-      setRemoteStream(remoteUid, current);
+      // FIX: always use the SAME stream object from ref
+      const rs = remoteStreamRefs.current.get(remoteUid);
+      if (!rs) return;
+      if (!rs.getTracks().find(t => t.id === track.id)) {
+        rs.addTrack(track);
+      }
+      // FIX: force store update with new Map so React sees change
+      setRemoteStream(remoteUid, rs);
+
+      track.onmute = () => setRemoteStream(remoteUid, rs);
+      track.onunmute = () => setRemoteStream(remoteUid, rs);
     };
 
     pc.onicecandidate = ({ candidate }) => {
       if (!candidate) return;
       const roomId = getRoomId();
-      if (roomId) getSocket$().emit('ice_candidate', { targetUid: remoteUid, candidate, roomId });
+      if (roomId) socket$().emit('ice_candidate', { targetUid: remoteUid, candidate, roomId });
     };
 
     pc.oniceconnectionstatechange = () => {
+      console.log(`[WebRTC] ICE ${remoteUid}:`, pc.iceConnectionState);
       if (pc.iceConnectionState === 'failed') pc.restartIce();
     };
 
     pc.onconnectionstatechange = () => {
+      console.log(`[WebRTC] Conn ${remoteUid}:`, pc.connectionState);
       if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
         removePeerConnection(remoteUid);
         removeRemoteStream(remoteUid);
         removePeerInfo(remoteUid);
+        remoteStreamRefs.current.delete(remoteUid);
         iceQueues.current.delete(remoteUid);
         remoteDescReady.current.delete(remoteUid);
       }
@@ -85,10 +98,10 @@ export const useWebRTC = () => {
     if (!pc) return;
     makingOfferRef.current.add(remoteUid);
     try {
-      const offer = await pc.createOffer();
+      const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
       await pc.setLocalDescription(offer);
       const roomId = getRoomId();
-      if (roomId) getSocket$().emit('offer', { targetUid: remoteUid, offer: pc.localDescription, roomId });
+      if (roomId) socket$().emit('offer', { targetUid: remoteUid, offer: pc.localDescription, roomId });
     } catch (err) {
       console.error('[WebRTC] sendOffer error:', err);
     } finally {
@@ -96,7 +109,6 @@ export const useWebRTC = () => {
     }
   };
 
-  // ── initLocalStream ───────────────────────────────────────────────────────
   const initLocalStream = useCallback(async () => {
     try {
       const stream = await getUserMedia({ video: true, audio: true });
@@ -114,40 +126,40 @@ export const useWebRTC = () => {
     }
   }, [setLocalStream, setVideoEnabled]);
 
-  // ── Socket listeners — registered ONCE on mount, never re-registered ──────
+  // Mount once — all state via store.getState() / refs
   useEffect(() => {
-    const socket = getSocket$();
+    const socket = socket$();
 
     const onUsersInRoom = ({ users }) => {
+      console.log('[WebRTC] users_in_room:', users.map(u => u.displayName));
       users.forEach(({ uid, displayName }) => sendOffer(uid, displayName));
     };
 
     const onUserJoined = ({ uid, displayName }) => {
-      // New user joined after us — they will send us an offer; just register info
+      console.log('[WebRTC] user_joined:', displayName);
       setPeerInfo(uid, { displayName });
+      // They will send us an offer — just register info for now
     };
 
     const onOffer = async ({ offer, fromUid, fromDisplayName }) => {
+      console.log('[WebRTC] got offer from:', fromDisplayName);
       let pc = useCallStore.getState().peerConnections.get(fromUid);
       if (!pc || pc.signalingState === 'closed') {
         pc = createPeer(fromUid, fromDisplayName);
-        if (!pc) return;
+        if (!pc) { console.error('[WebRTC] createPeer failed in onOffer'); return; }
       }
       try {
-        // Handle offer collision (glare)
-        if (makingOfferRef.current.has(fromUid) || pc.signalingState !== 'stable') {
-          if (pc.signalingState !== 'stable') {
-            await Promise.all([
-              pc.setLocalDescription({ type: 'rollback' }),
-              pc.setRemoteDescription(new RTCSessionDescription(offer)),
-            ]);
+        if (pc.signalingState !== 'stable') {
+          console.warn('[WebRTC] signalingState not stable:', pc.signalingState);
+          if (makingOfferRef.current.has(fromUid)) {
+            // Glare — both made offers simultaneously, abort ours
+            await pc.setLocalDescription({ type: 'rollback' });
+            makingOfferRef.current.delete(fromUid);
           } else {
-            await pc.setRemoteDescription(new RTCSessionDescription(offer));
+            return; // Can't handle offer in this state
           }
-          makingOfferRef.current.delete(fromUid);
-        } else {
-          await pc.setRemoteDescription(new RTCSessionDescription(offer));
         }
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
         remoteDescReady.current.set(fromUid, true);
         await flushIce(fromUid, pc);
         const answer = await pc.createAnswer();
@@ -158,8 +170,13 @@ export const useWebRTC = () => {
     };
 
     const onAnswer = async ({ answer, fromUid }) => {
+      console.log('[WebRTC] got answer from:', fromUid);
       const pc = useCallStore.getState().peerConnections.get(fromUid);
-      if (!pc || pc.signalingState !== 'have-local-offer') return;
+      if (!pc) { console.warn('[WebRTC] No PC for answer from', fromUid); return; }
+      if (pc.signalingState !== 'have-local-offer') {
+        console.warn('[WebRTC] Bad state for answer:', pc.signalingState);
+        return;
+      }
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
         remoteDescReady.current.set(fromUid, true);
@@ -171,7 +188,7 @@ export const useWebRTC = () => {
       if (!candidate) return;
       const pc = useCallStore.getState().peerConnections.get(fromUid);
       if (!pc || pc.signalingState === 'closed') return;
-      if (remoteDescReady.current.get(fromUid)) {
+      if (remoteDescReady.current.get(fromUid) && pc.remoteDescription) {
         try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
       } else {
         const q = iceQueues.current.get(fromUid) || [];
@@ -184,6 +201,7 @@ export const useWebRTC = () => {
       removePeerConnection(uid);
       removeRemoteStream(uid);
       removePeerInfo(uid);
+      remoteStreamRefs.current.delete(uid);
       iceQueues.current.delete(uid);
       remoteDescReady.current.delete(uid);
     };
@@ -209,30 +227,34 @@ export const useWebRTC = () => {
     const onRenegotiateAnswer = async ({ answer, fromUid }) => {
       const pc = useCallStore.getState().peerConnections.get(fromUid);
       if (!pc) return;
-      try { await pc.setRemoteDescription(new RTCSessionDescription(answer)); } catch (err) { console.error(err); }
+      try { await pc.setRemoteDescription(new RTCSessionDescription(answer)); }
+      catch (err) { console.error('[WebRTC] renegotiateAnswer error:', err); }
     };
 
-    // Remove any stale listeners first (important after HMR / strict mode double-mount)
     const events = [
-      ['users_in_room', onUsersInRoom], ['user_joined', onUserJoined],
-      ['offer', onOffer], ['answer', onAnswer], ['ice_candidate', onIce],
-      ['user_left', onUserLeft], ['peer_media_state', onPeerMedia],
-      ['renegotiate', onRenegotiate], ['renegotiate_answer', onRenegotiateAnswer],
+      ['users_in_room', onUsersInRoom],
+      ['user_joined', onUserJoined],
+      ['offer', onOffer],
+      ['answer', onAnswer],
+      ['ice_candidate', onIce],
+      ['user_left', onUserLeft],
+      ['peer_media_state', onPeerMedia],
+      ['renegotiate', onRenegotiate],
+      ['renegotiate_answer', onRenegotiateAnswer],
     ];
+
     events.forEach(([e]) => socket.off(e));
     events.forEach(([e, fn]) => socket.on(e, fn));
-
     return () => events.forEach(([e, fn]) => socket.off(e, fn));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // MOUNT ONCE — all state via store.getState() and refs
+  }, []);
 
-  // ── Controls ──────────────────────────────────────────────────────────────
   const toggleAudio = useCallback(() => {
     const { audioEnabled, videoEnabled, isScreenSharing, currentRoom } = useCallStore.getState();
     const newVal = !audioEnabled;
     localStreamRef.current?.getAudioTracks().forEach(t => { t.enabled = newVal; });
     setAudioEnabled(newVal);
-    getSocket$().emit('media_state', { roomId: currentRoom?.roomId, audioEnabled: newVal, videoEnabled, screenSharing: isScreenSharing });
+    socket$().emit('media_state', { roomId: currentRoom?.roomId, audioEnabled: newVal, videoEnabled, screenSharing: isScreenSharing });
   }, [setAudioEnabled]);
 
   const toggleVideo = useCallback(async () => {
@@ -258,7 +280,7 @@ export const useWebRTC = () => {
     }
     setVideoEnabled(newVal);
     setLocalStream(new MediaStream(stream.getTracks()));
-    getSocket$().emit('media_state', { roomId: currentRoom?.roomId, audioEnabled, videoEnabled: newVal, screenSharing: isScreenSharing });
+    socket$().emit('media_state', { roomId: currentRoom?.roomId, audioEnabled, videoEnabled: newVal, screenSharing: isScreenSharing });
   }, [setVideoEnabled, setLocalStream]);
 
   const startScreenShare = useCallback(async () => {
@@ -273,10 +295,10 @@ export const useWebRTC = () => {
         try {
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
-          getSocket$().emit('renegotiate', { targetUid: uid, offer: pc.localDescription, roomId: currentRoom?.roomId });
+          socket$().emit('renegotiate', { targetUid: uid, offer: pc.localDescription, roomId: currentRoom?.roomId });
         } catch {}
       }
-      getSocket$().emit('media_state', { roomId: currentRoom?.roomId, audioEnabled, videoEnabled: true, screenSharing: true });
+      socket$().emit('media_state', { roomId: currentRoom?.roomId, audioEnabled, videoEnabled: true, screenSharing: true });
       track.onended = () => stopScreenShare();
     } catch (err) { console.error('startScreenShare:', err); }
   }, [setScreenStream]);
@@ -293,15 +315,15 @@ export const useWebRTC = () => {
         try {
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
-          getSocket$().emit('renegotiate', { targetUid: uid, offer: pc.localDescription, roomId: currentRoom?.roomId });
+          socket$().emit('renegotiate', { targetUid: uid, offer: pc.localDescription, roomId: currentRoom?.roomId });
         } catch {}
       }
     }
-    getSocket$().emit('media_state', { roomId: currentRoom?.roomId, audioEnabled, videoEnabled, screenSharing: false });
+    socket$().emit('media_state', { roomId: currentRoom?.roomId, audioEnabled, videoEnabled, screenSharing: false });
   }, [setScreenStream]);
 
   const endCall = useCallback(() => {
-    getSocket$().emit('leave_room');
+    socket$().emit('leave_room');
     cleanupCall();
   }, [cleanupCall]);
 

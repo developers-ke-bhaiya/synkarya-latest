@@ -16,8 +16,13 @@ const fmt = (secs) => {
 
 const fmtDate = (iso) => {
   if (!iso) return '—';
-  return new Date(iso).toLocaleString('en-IN', {
-    day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  // Show in IST (UTC+5:30) with clear date + time
+  return d.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true,
   });
 };
 
