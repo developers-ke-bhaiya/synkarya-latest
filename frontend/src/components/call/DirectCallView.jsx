@@ -9,49 +9,40 @@ import { useAuthStore } from '../../store/authStore';
 import { Avatar } from '../ui/Avatar';
 import { formatMessageTime } from '../../utils/formatters';
 
-// ── Stable video box: srcObject synced via ref, never recreated ──────────────
+// ── VideoBox: always assigns srcObject, polls for track readyState ──────────
 const VideoBox = ({ stream, name, isLocal, muted = false, screenSharing = false, className = '' }) => {
   const videoRef = useRef(null);
   const [hasVideo, setHasVideo] = useState(false);
 
-  const checkVideo = useCallback((s) => {
-    if (!s) { setHasVideo(false); return; }
-    setHasVideo(s.getVideoTracks().some(t => t.readyState === 'live' && t.enabled));
-  }, []);
-
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
-    if (stream) {
-      if (el.srcObject !== stream) {
-        el.srcObject = stream;
-        el.play().catch(() => {});
-      }
-      checkVideo(stream);
-      const onChange = () => checkVideo(stream);
-      stream.addEventListener('addtrack', onChange);
-      stream.addEventListener('removetrack', onChange);
-      return () => {
-        stream.removeEventListener('addtrack', onChange);
-        stream.removeEventListener('removetrack', onChange);
-      };
-    } else {
-      el.srcObject = null;
-      setHasVideo(false);
-    }
-  }, [stream, checkVideo]);
+    if (!stream) { el.srcObject = null; setHasVideo(false); return; }
+
+    el.srcObject = stream;
+    el.play().catch(() => {});
+
+    const update = () => {
+      const tracks = stream.getVideoTracks();
+      setHasVideo(tracks.length > 0 && tracks.some(t => t.readyState === 'live'));
+    };
+    update();
+    stream.addEventListener('addtrack', update);
+    stream.addEventListener('removetrack', update);
+    const poll = setInterval(update, 500);
+    return () => {
+      stream.removeEventListener('addtrack', update);
+      stream.removeEventListener('removetrack', update);
+      clearInterval(poll);
+    };
+  }, [stream]);
 
   return (
-    <div
-      className={`relative overflow-hidden ${className}`}
-      style={{ background: 'var(--bg-elevated)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border)' }}
-    >
-      <video
-        ref={videoRef}
-        autoPlay playsInline muted={muted}
-        className={`w-full h-full object-cover transition-opacity duration-300 ${hasVideo ? 'opacity-100' : 'opacity-0 absolute inset-0'}`}
-        style={{ transform: isLocal && !screenSharing ? 'scaleX(-1)' : 'none' }}
-      />
+    <div className={`relative overflow-hidden ${className}`}
+      style={{ background: 'var(--bg-elevated)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border)' }}>
+      <video ref={videoRef} autoPlay playsInline muted={muted}
+        className="w-full h-full object-cover"
+        style={{ transform: isLocal && !screenSharing ? 'scaleX(-1)' : 'none', opacity: hasVideo ? 1 : 0, transition: 'opacity 0.3s' }} />
       {!hasVideo && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="flex flex-col items-center gap-3">
@@ -75,6 +66,7 @@ const VideoBox = ({ stream, name, isLocal, muted = false, screenSharing = false,
 };
 
 // ── Control button ────────────────────────────────────────────────────────────
+
 const Btn = ({ onClick, isOff, accentOn, icon, label, size = 'md' }) => {
   const base = isOff
     ? 'bg-red-500/15 hover:bg-red-500 text-red-400 hover:text-white'

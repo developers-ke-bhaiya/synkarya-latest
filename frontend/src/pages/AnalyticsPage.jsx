@@ -17,13 +17,18 @@ const fmt = (secs) => {
 const fmtDate = (iso) => {
   if (!iso) return '—';
   const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  // Show in IST (UTC+5:30) with clear date + time
-  return d.toLocaleString('en-IN', {
-    timeZone: 'Asia/Kolkata',
-    day: '2-digit', month: 'short', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', hour12: true,
-  });
+  if (isNaN(d.getTime())) return '—';
+  // IST = UTC+5:30
+  const ist = new Date(d.getTime() + (5.5 * 60 * 60 * 1000));
+  const dd = String(ist.getUTCDate()).padStart(2, '0');
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const mm = months[ist.getUTCMonth()];
+  const yyyy = ist.getUTCFullYear();
+  let hh = ist.getUTCHours();
+  const min = String(ist.getUTCMinutes()).padStart(2, '0');
+  const ampm = hh >= 12 ? 'PM' : 'AM';
+  hh = hh % 12 || 12;
+  return `${dd} ${mm} ${yyyy}, ${hh}:${min} ${ampm} IST`;
 };
 
 const Bar = ({ pct, color }) => (

@@ -213,8 +213,10 @@ export const useDirectCall = () => {
     const { activeDirectCall } = useOnlineStore.getState();
     if (!activeDirectCall?.peerUid || !message?.trim()) return;
     const { user } = require('../store/authStore').useAuthStore.getState();
+    // Add locally immediately (optimistic)
     const msg = {
-      id: Date.now().toString(), uid: user?.uid, displayName: user?.displayName,
+      id: Date.now().toString() + '_local',
+      uid: user?.uid, displayName: user?.displayName,
       message: message.trim(), timestamp: new Date().toISOString(),
     };
     addDirectMessage(msg);
@@ -307,8 +309,9 @@ export const useDirectCall = () => {
     };
 
     const onDirectChat = (msg) => {
+      // Only add remote messages — our own are added optimistically in sendDirectMessage
       const { user } = require('../store/authStore').useAuthStore.getState();
-      if (msg.uid === user?.uid) return;
+      if (msg.uid === user?.uid) return; // skip echo of own msg
       addDirectMessage(msg);
     };
 

@@ -36,7 +36,20 @@ const setupSocketHandlers = (io) => {
         const db = getDb();
         const now = new Date().toISOString();
         await db.collection('users').doc(uid).update({ currentStatus: status, statusUpdatedAt: now });
-        await db.collection('statusHistory').add({ uid, displayName, status, timestamp: now });
+        // Dedup: don't save if same status was saved in last 60 seconds
+        // Simple query — only uid filter, no composite index needed
+        const recent = await db.collection('statusHistory')
+          .where('uid', '==', uid)
+          .orderBy('timestamp', 'desc')
+          .limit(1)
+          .get();
+        const lastEntry = recent.docs[0]?.data();
+        const lastTime = lastEntry ? new Date(lastEntry.timestamp).getTime() : 0;
+        const isSameStatus = lastEntry?.status === status;
+        const isRecent = Date.now() - lastTime < 60000;
+        if (!(isSameStatus && isRecent)) {
+          await db.collection('statusHistory').add({ uid, displayName, status, timestamp: now });
+        }
       } catch (err) { console.error('update_status error:', err.message); }
       const u = onlineUsers.get(uid);
       if (u) { u.status = status; onlineUsers.set(uid, u); }
