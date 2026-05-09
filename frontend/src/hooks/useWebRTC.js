@@ -183,6 +183,12 @@ export const useWebRTC = () => {
       sendOffer(uid, displayName);
     };
 
+    // Get my own UID for glare resolution
+    const getMyUid = () => {
+      try { return require('../store/authStore').useAuthStore.getState().user?.uid || ''; }
+      catch { return ''; }
+    };
+
     const onOffer = async ({ offer, fromUid, fromDisplayName }) => {
       console.log('[WebRTC] got offer from:', fromDisplayName);
       let pc = useCallStore.getState().peerConnections.get(fromUid);
@@ -191,14 +197,19 @@ export const useWebRTC = () => {
         if (!pc) { console.error('[WebRTC] createPeer failed in onOffer'); return; }
       }
       try {
-        if (pc.signalingState !== 'stable') {
-          console.warn('[WebRTC] signalingState not stable:', pc.signalingState);
-          if (makingOfferRef.current.has(fromUid)) {
-            // Glare — both made offers simultaneously, abort ours
-            await pc.setLocalDescription({ type: 'rollback' });
-            makingOfferRef.current.delete(fromUid);
+        if (pc.signalingState === 'have-local-offer') {
+          // GLARE: both sides sent offer simultaneously
+          // Polite peer (higher UID) rolls back and accepts remote offer
+          // Impolite peer (lower UID) ignores incoming offer, waits for answer
+          const myUid = getMyUid();
+          const imPolite = myUid < fromUid; // lower UID = impolite = keep our offer
+          if (imPolite) {
+            console.log('[WebRTC] glare — impolite, ignoring their offer, keeping ours');
+            return;
           } else {
-            return; // Can't handle offer in this state
+            console.log('[WebRTC] glare — polite, rolling back our offer');
+            makingOfferRef.current.delete(fromUid);
+            await pc.setLocalDescription({ type: 'rollback' });
           }
         }
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
@@ -208,6 +219,7 @@ export const useWebRTC = () => {
         await pc.setLocalDescription(answer);
         const roomId = getRoomId();
         if (roomId) socket.emit('answer', { targetUid: fromUid, answer: pc.localDescription, roomId });
+        console.log('[WebRTC] answer sent to', fromDisplayName);
       } catch (err) { console.error('[WebRTC] onOffer error:', err); }
     };
 
