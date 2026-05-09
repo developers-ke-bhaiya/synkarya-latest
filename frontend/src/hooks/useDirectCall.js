@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useOnlineStore } from '../store/onlineStore';
+import { useAuthStore } from '../store/authStore';
 import { getSocket } from '../services/socket';
 import {
   createPeerConnection, getUserMedia, getDisplayMedia,
@@ -212,7 +213,7 @@ export const useDirectCall = () => {
   const sendDirectMessage = useCallback((message) => {
     const { activeDirectCall } = useOnlineStore.getState();
     if (!activeDirectCall?.peerUid || !message?.trim()) return;
-    const { user } = require('../store/authStore').useAuthStore.getState();
+    const { user } = useAuthStore.getState();
     // Add locally immediately (optimistic)
     const msg = {
       id: Date.now().toString() + '_local',
@@ -310,7 +311,7 @@ export const useDirectCall = () => {
 
     const onDirectChat = (msg) => {
       // Only add remote messages — our own are added optimistically in sendDirectMessage
-      const { user } = require('../store/authStore').useAuthStore.getState();
+      const { user } = useAuthStore.getState();
       if (msg.uid === user?.uid) return; // skip echo of own msg
       addDirectMessage(msg);
     };
