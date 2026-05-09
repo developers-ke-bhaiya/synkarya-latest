@@ -77,10 +77,20 @@ export const useDirectCall = () => {
     remoteStreamRef.current = rs;
 
     pc.ontrack = ({ track }) => {
+      console.log('[DC] ontrack:', track.kind, track.readyState);
       if (!rs.getTracks().find(t => t.id === track.id)) rs.addTrack(track);
+      // FIX: force update even if remoteStream ref is same object
       useOnlineStore.setState(s => ({
-        activeDirectCall: s.activeDirectCall ? { ...s.activeDirectCall, remoteStream: rs } : s.activeDirectCall,
+        activeDirectCall: s.activeDirectCall
+          ? { ...s.activeDirectCall, remoteStream: rs, _trackUpdate: Date.now() }
+          : { peerUid: peerUid, peerName: '', peerAvatar: null, localStream: null, remoteStream: rs, pc, _trackUpdate: Date.now() },
       }));
+      // Poll to keep video showing even if readyState changes
+      track.onunmute = () => {
+        useOnlineStore.setState(s => ({
+          activeDirectCall: s.activeDirectCall ? { ...s.activeDirectCall, _trackUpdate: Date.now() } : s.activeDirectCall,
+        }));
+      };
     };
 
     pc.onicecandidate = ({ candidate }) => {
