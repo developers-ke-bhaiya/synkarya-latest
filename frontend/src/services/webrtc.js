@@ -5,44 +5,16 @@
 
 export const ICE_SERVERS = {
   iceServers: [
-    // Multiple STUN servers
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
-    // Metered TURN (free, reliable)
-    {
-      urls: 'turn:openrelay.metered.ca:80',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:80?transport=tcp',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+    // TCP TURN — works through most firewalls and NAT
+    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turns:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
     // Backup TURN servers
-    {
-      urls: 'turn:relay1.expressturn.com:3478',
-      username: 'efRPNIBNMRBMBMAQBF',
-      credential: 'YAuPUGTrWV3CtXIk',
-    },
-    {
-      urls: 'turn:numb.viagenie.ca',
-      username: 'webrtc@live.com',
-      credential: 'muazkh',
-    },
+    { urls: 'turn:relay1.expressturn.com:3478', username: 'efRPNIBNMRBMBMAQBF', credential: 'YAuPUGTrWV3CtXIk' },
+    { urls: 'turn:relay1.expressturn.com:3478?transport=tcp', username: 'efRPNIBNMRBMBMAQBF', credential: 'YAuPUGTrWV3CtXIk' },
+    // Additional free TURN
+    { urls: 'turn:turn.anyfirewall.com:443?transport=tcp', username: 'webrtc', credential: 'webrtc' },
+    { urls: 'turn:global.turn.twilio.com:3478?transport=udp', username: 'webrtc', credential: 'webrtc' },
   ],
   iceCandidatePoolSize: 10,
   iceTransportPolicy: 'all',
