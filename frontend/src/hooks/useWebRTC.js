@@ -15,6 +15,7 @@ export const useWebRTC = () => {
 
   const localStreamRef = useRef(null);
   const makingOfferRef = useRef(new Set());
+  const offeredPeersRef = useRef(new Set()); // track peers we've already sent offer to
   const iceQueues = useRef(new Map());
   const remoteDescReady = useRef(new Map());
   // FIX: stable MediaStream refs per peer — never recreate, only add tracks
@@ -116,6 +117,11 @@ export const useWebRTC = () => {
       console.log('[WebRTC] sendOffer skipped — already making offer to', remoteDisplayName);
       return;
     }
+    // Guard: already sent offer to this peer this session
+    if (offeredPeersRef.current.has(remoteUid)) {
+      console.log('[WebRTC] sendOffer skipped — already offered to', remoteDisplayName);
+      return;
+    }
     // Guard: if PC already exists and is not stable/new, skip
     const existingPc = useCallStore.getState().peerConnections.get(remoteUid);
     if (existingPc && existingPc.signalingState !== 'stable' && existingPc.signalingState !== 'closed') {
@@ -123,6 +129,7 @@ export const useWebRTC = () => {
       return;
     }
     makingOfferRef.current.add(remoteUid);
+    offeredPeersRef.current.add(remoteUid);
     try {
       await waitForStream();
       const pc = createPeer(remoteUid, remoteDisplayName);
@@ -174,8 +181,8 @@ export const useWebRTC = () => {
 
     const onUsersInRoom = ({ users }) => {
       console.log('[WebRTC] users_in_room:', users.map(u => u.displayName));
-      // I just joined — existing users will send ME offers when they get user_joined
-      // Just register their info so we can create PC when offer arrives
+      // I just joined — existing users will send ME offers via user_joined event
+      // Just save their info — PC will be created when their offer arrives
       users.forEach(({ uid, displayName }) => {
         setPeerInfo(uid, { displayName });
       });
@@ -266,6 +273,7 @@ export const useWebRTC = () => {
       remoteStreamRefs.current.delete(uid);
       iceQueues.current.delete(uid);
       remoteDescReady.current.delete(uid);
+      offeredPeersRef.current.delete(uid); // allow re-offer if they rejoin
     };
 
     const onPeerMedia = ({ uid, audioEnabled, videoEnabled, screenSharing }) => {
