@@ -10,7 +10,7 @@ import { Avatar } from '../ui/Avatar';
 import { useToast } from '../ui/Toast';
 import { Spinner } from '../ui/Spinner';
 import { getSocket, disconnectSocket } from '../../services/socket';
-import { useWebRTC } from '../../hooks/useWebRTC';
+import { getUserMedia } from '../../services/webrtc';
 import { useChat } from '../../hooks/useChat';
 import { StatusEditor } from './StatusPopup';
 
@@ -27,7 +27,7 @@ export const Sidebar = ({ onRoomJoined }) => {
   const { user, logout } = useAuthStore();
   const { currentRoom, inCall } = useCallStore();
   const { addToast } = useToast();
-  const { initLocalStream } = useWebRTC();
+
   const { loadHistory } = useChat();
   const navigate = useNavigate();
 
@@ -73,7 +73,14 @@ export const Sidebar = ({ onRoomJoined }) => {
     if (inCall) { addToast('Leave current call first', 'info'); return; }
     setJoiningRoom(room.roomId);
     try {
-      await initLocalStream();
+      // Get stream directly — avoid creating duplicate useWebRTC instance
+      const { setLocalStream } = useCallStore.getState();
+      let stream = useCallStore.getState().localStream;
+      if (!stream || !stream.active) {
+        try { stream = await getUserMedia({ video: true, audio: true }); }
+        catch { stream = await getUserMedia({ video: false, audio: true }); }
+        setLocalStream(stream);
+      }
       const { setCurrentRoom, setInCall } = useCallStore.getState();
       setCurrentRoom(room);
       setInCall(true);

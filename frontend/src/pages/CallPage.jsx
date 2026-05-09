@@ -16,7 +16,7 @@ import { useCallStore } from '../store/callStore';
 import { useChatStore } from '../store/chatStore';
 import { useOnlineStore } from '../store/onlineStore';
 import { useOnlineUsers } from '../hooks/useOnlineUsers';
-import { useWebRTC } from '../hooks/useWebRTC';
+import { WebRTCProvider } from '../hooks/useWebRTC';
 import { useDirectCall } from '../hooks/useDirectCall';
 
 export const CallPage = () => {
@@ -30,7 +30,6 @@ export const CallPage = () => {
 
   useOnlineUsers();
   useDirectCall();
-  useWebRTC(); // registers all room WebRTC socket listeners
 
   const closeMobilePanel = () => setMobilePanel(null);
   const toggleMobilePanel = (name) => setMobilePanel(p => p === name ? null : name);
@@ -174,6 +173,8 @@ export const CallPage = () => {
         </MobileSheet>
       )}
 
+      {/* WebRTC listeners — mounted once, stable */}
+      <WebRTCProvider />
       {/* Global overlays */}
       <IncomingCallModal />
       <StatusPopup />

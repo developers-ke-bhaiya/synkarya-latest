@@ -111,13 +111,26 @@ export const useWebRTC = () => {
   });
 
   const sendOffer = async (remoteUid, remoteDisplayName) => {
-    if (makingOfferRef.current.has(remoteUid)) return;
+    // Guard: only one offer at a time per peer
+    if (makingOfferRef.current.has(remoteUid)) {
+      console.log('[WebRTC] sendOffer skipped — already making offer to', remoteDisplayName);
+      return;
+    }
+    // Guard: if PC already exists and is not stable/new, skip
+    const existingPc = useCallStore.getState().peerConnections.get(remoteUid);
+    if (existingPc && existingPc.signalingState !== 'stable' && existingPc.signalingState !== 'closed') {
+      console.log('[WebRTC] sendOffer skipped — PC state:', existingPc.signalingState);
+      return;
+    }
     makingOfferRef.current.add(remoteUid);
     try {
-      // FIX: wait up to 4s for local stream before making offer
       await waitForStream();
       const pc = createPeer(remoteUid, remoteDisplayName);
       if (!pc) return;
+      if (pc.signalingState !== 'stable') {
+        console.log('[WebRTC] sendOffer: PC not stable after createPeer:', pc.signalingState);
+        return;
+      }
       const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
       await pc.setLocalDescription(offer);
       const roomId = getRoomId();
@@ -157,6 +170,7 @@ export const useWebRTC = () => {
   // Mount once — all state via store.getState() / refs
   useEffect(() => {
     const socket = socket$();
+    // Remove any stale listeners first (StrictMode runs effects twice in dev)
 
     const onUsersInRoom = ({ users }) => {
       console.log('[WebRTC] users_in_room:', users.map(u => u.displayName));
@@ -356,4 +370,10 @@ export const useWebRTC = () => {
   }, [cleanupCall]);
 
   return { initLocalStream, toggleAudio, toggleVideo, startScreenShare, stopScreenShare, endCall };
+};
+
+// Re-export a component wrapper so listeners stay mounted at app level
+export const WebRTCProvider = () => {
+  useWebRTC();
+  return null;
 };
