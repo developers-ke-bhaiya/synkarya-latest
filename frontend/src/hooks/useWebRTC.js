@@ -189,17 +189,32 @@ export const useWebRTC = () => {
 
     const onOffer = async ({ offer, fromUid, fromDisplayName }) => {
       console.log('[WebRTC] got offer from:', fromDisplayName);
-      // New joiner receives offer from existing user
-      // No glare possible — only existing user sends offer
-      let pc = useCallStore.getState().peerConnections.get(fromUid);
-      if (!pc || pc.signalingState === 'closed') {
-        pc = createPeer(fromUid, fromDisplayName);
-        if (!pc) { console.error('[WebRTC] createPeer failed in onOffer'); return; }
-      }
       try {
+        // FIX: ensure local stream exists before answering
+        // If no stream yet, wait for it (user may have received offer before camera init)
+        const stream = await waitForStream().catch(async () => {
+          // Last resort: try to get stream directly
+          try {
+            const s = await getUserMedia({ video: true, audio: true });
+            localStreamRef.current = s;
+            useCallStore.getState().setLocalStream(s);
+            return s;
+          } catch {
+            const s = await getUserMedia({ video: false, audio: true });
+            localStreamRef.current = s;
+            useCallStore.getState().setLocalStream(s);
+            return s;
+          }
+        });
+        console.log('[WebRTC] stream ready for offer, tracks:', stream.getTracks().map(t=>t.kind));
+
+        let pc = useCallStore.getState().peerConnections.get(fromUid);
+        if (!pc || pc.signalingState === 'closed') {
+          pc = createPeer(fromUid, fromDisplayName);
+          if (!pc) { console.error('[WebRTC] createPeer failed in onOffer'); return; }
+        }
         if (pc.signalingState !== 'stable') {
-          console.warn('[WebRTC] unexpected state for offer:', pc.signalingState, '— resetting');
-          // Close and recreate
+          console.warn('[WebRTC] resetting PC, bad state:', pc.signalingState);
           try { pc.close(); } catch {}
           removePeerConnection(fromUid);
           pc = createPeer(fromUid, fromDisplayName);
