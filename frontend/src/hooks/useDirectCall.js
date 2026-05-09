@@ -38,6 +38,7 @@ export const useDirectCall = () => {
   const remoteStreamRef = useRef(null);
   const iceQueueRef = useRef([]);
   const remoteDescReadyRef = useRef(false);
+  const pendingOfferRef = useRef(null); // stores offer if it arrives before PC is ready
 
   const getSocket$ = () => getSocket();
 
@@ -55,6 +56,7 @@ export const useDirectCall = () => {
     remoteStreamRef.current = null;
     remoteDescReadyRef.current = false;
     iceQueueRef.current = [];
+    pendingOfferRef.current = null;
   };
 
   const getMedia = async () => {
@@ -88,6 +90,24 @@ export const useDirectCall = () => {
     pc.oniceconnectionstatechange = () => {
       if (pc.iceConnectionState === 'failed') pc.restartIce();
     };
+
+    // FIX: if offer arrived before PC was ready, process it now
+    if (pendingOfferRef.current) {
+      const { offer, fromUid } = pendingOfferRef.current;
+      pendingOfferRef.current = null;
+      console.log('[DC] processing pending offer from', fromUid);
+      setTimeout(async () => {
+        try {
+          await pc.setRemoteDescription(new RTCSessionDescription(offer));
+          remoteDescReadyRef.current = true;
+          await flushIce(pc);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          getSocket$().emit('direct_answer', { targetUid: fromUid, answer: pc.localDescription });
+          console.log('[DC] pending offer processed, answer sent');
+        } catch (err) { console.error('[DC] pending offer error:', err); }
+      }, 0);
+    }
 
     return { pc, remoteStream: rs };
   };
@@ -245,7 +265,12 @@ export const useDirectCall = () => {
     // ACCEPTOR: receives offer → creates answer
     const onDirectOffer = async ({ offer, fromUid }) => {
       const pc = pcRef.current;
-      if (!pc) { console.error('[DC] Got offer but no PC — acceptCall not done yet?'); return; }
+      if (!pc) {
+        // PC not ready yet (acceptCall still getting camera) — queue the offer
+        console.log('[DC] PC not ready, queuing offer from', fromUid);
+        pendingOfferRef.current = { offer, fromUid };
+        return;
+      }
       try {
         if (pc.signalingState !== 'stable') {
           console.warn('[DC] Bad state for offer:', pc.signalingState);
@@ -257,7 +282,7 @@ export const useDirectCall = () => {
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         socket.emit('direct_answer', { targetUid: fromUid, answer: pc.localDescription });
-        console.log('[DC] answer sent');
+        console.log('[DC] answer sent to', fromUid);
       } catch (err) { console.error('[DC] onOffer error:', err); }
     };
 
