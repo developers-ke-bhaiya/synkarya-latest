@@ -5,9 +5,13 @@
 
 export const ICE_SERVERS = {
   iceServers: [
+    // Multiple STUN servers
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    // Metered TURN (free, reliable)
     {
       urls: 'turn:openrelay.metered.ca:80',
       username: 'openrelayproject',
@@ -28,8 +32,20 @@ export const ICE_SERVERS = {
       username: 'openrelayproject',
       credential: 'openrelayproject',
     },
+    // Backup TURN servers
+    {
+      urls: 'turn:relay1.expressturn.com:3478',
+      username: 'efRPNIBNMRBMBMAQBF',
+      credential: 'YAuPUGTrWV3CtXIk',
+    },
+    {
+      urls: 'turn:numb.viagenie.ca',
+      username: 'webrtc@live.com',
+      credential: 'muazkh',
+    },
   ],
   iceCandidatePoolSize: 10,
+  iceTransportPolicy: 'all',
 };
 
 export const createPeerConnection = () => {
