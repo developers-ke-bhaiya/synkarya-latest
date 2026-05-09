@@ -136,9 +136,9 @@ export const useWebRTC = () => {
     };
 
     const onUserJoined = ({ uid, displayName }) => {
-      console.log('[WebRTC] user_joined:', displayName);
-      setPeerInfo(uid, { displayName });
-      // They will send us an offer — just register info for now
+      console.log('[WebRTC] user_joined:', displayName, '— sending offer');
+      // FIX: WE send the offer to the new user (they just joined, we are already here)
+      sendOffer(uid, displayName);
     };
 
     const onOffer = async ({ offer, fromUid, fromDisplayName }) => {
