@@ -174,43 +174,36 @@ export const useWebRTC = () => {
 
     const onUsersInRoom = ({ users }) => {
       console.log('[WebRTC] users_in_room:', users.map(u => u.displayName));
-      users.forEach(({ uid, displayName }) => sendOffer(uid, displayName));
+      // I just joined — existing users will send ME offers when they get user_joined
+      // Just register their info so we can create PC when offer arrives
+      users.forEach(({ uid, displayName }) => {
+        setPeerInfo(uid, { displayName });
+      });
     };
 
     const onUserJoined = ({ uid, displayName }) => {
-      console.log('[WebRTC] user_joined:', displayName, '— sending offer');
-      // FIX: WE send the offer to the new user (they just joined, we are already here)
+      console.log('[WebRTC] user_joined:', displayName, '— I am existing user, sending offer');
+      // I am already in the room — I send offer to the newly joined user
       sendOffer(uid, displayName);
-    };
-
-    // Get my own UID for glare resolution
-    const getMyUid = () => {
-      try { return require('../store/authStore').useAuthStore.getState().user?.uid || ''; }
-      catch { return ''; }
     };
 
     const onOffer = async ({ offer, fromUid, fromDisplayName }) => {
       console.log('[WebRTC] got offer from:', fromDisplayName);
+      // New joiner receives offer from existing user
+      // No glare possible — only existing user sends offer
       let pc = useCallStore.getState().peerConnections.get(fromUid);
       if (!pc || pc.signalingState === 'closed') {
         pc = createPeer(fromUid, fromDisplayName);
         if (!pc) { console.error('[WebRTC] createPeer failed in onOffer'); return; }
       }
       try {
-        if (pc.signalingState === 'have-local-offer') {
-          // GLARE: both sides sent offer simultaneously
-          // Polite peer (higher UID) rolls back and accepts remote offer
-          // Impolite peer (lower UID) ignores incoming offer, waits for answer
-          const myUid = getMyUid();
-          const imPolite = myUid < fromUid; // lower UID = impolite = keep our offer
-          if (imPolite) {
-            console.log('[WebRTC] glare — impolite, ignoring their offer, keeping ours');
-            return;
-          } else {
-            console.log('[WebRTC] glare — polite, rolling back our offer');
-            makingOfferRef.current.delete(fromUid);
-            await pc.setLocalDescription({ type: 'rollback' });
-          }
+        if (pc.signalingState !== 'stable') {
+          console.warn('[WebRTC] unexpected state for offer:', pc.signalingState, '— resetting');
+          // Close and recreate
+          try { pc.close(); } catch {}
+          removePeerConnection(fromUid);
+          pc = createPeer(fromUid, fromDisplayName);
+          if (!pc) return;
         }
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
         remoteDescReady.current.set(fromUid, true);
