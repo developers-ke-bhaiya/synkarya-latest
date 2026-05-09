@@ -93,12 +93,20 @@ export const useWebRTC = () => {
   };
 
   const waitForStream = () => new Promise((resolve, reject) => {
-    if (localStreamRef.current) { resolve(localStreamRef.current); return; }
+    // FIX: read from store — not ref — because multiple hook instances share store
+    const check = () => {
+      const s = localStreamRef.current || useCallStore.getState().localStream;
+      if (s) { if (!localStreamRef.current) localStreamRef.current = s; return s; }
+      return null;
+    };
+    const immediate = check();
+    if (immediate) { resolve(immediate); return; }
     let attempts = 0;
     const iv = setInterval(() => {
       attempts++;
-      if (localStreamRef.current) { clearInterval(iv); resolve(localStreamRef.current); }
-      else if (attempts > 20) { clearInterval(iv); reject(new Error('stream timeout')); }
+      const s = check();
+      if (s) { clearInterval(iv); resolve(s); }
+      else if (attempts > 30) { clearInterval(iv); reject(new Error('stream timeout after 6s')); }
     }, 200);
   });
 
@@ -123,6 +131,13 @@ export const useWebRTC = () => {
   };
 
   const initLocalStream = useCallback(async () => {
+    // If store already has a stream (from another hook instance), reuse it
+    const existing = useCallStore.getState().localStream;
+    if (existing && existing.active) {
+      localStreamRef.current = existing;
+      console.log('[WebRTC] reusing existing stream from store');
+      return existing;
+    }
     try {
       const stream = await getUserMedia({ video: true, audio: true });
       localStreamRef.current = stream;
