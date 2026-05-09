@@ -33,7 +33,7 @@ export const useWebRTC = () => {
 
   const createPeer = (remoteUid, remoteDisplayName) => {
     const stream = localStreamRef.current;
-    if (!stream) { console.warn('[WebRTC] No local stream yet'); return null; }
+    if (!stream) { console.error('[WebRTC] createPeer: still no stream!'); return null; }
 
     const existing = useCallStore.getState().peerConnections.get(remoteUid);
     if (existing && existing.signalingState !== 'closed') return existing;
@@ -92,16 +92,29 @@ export const useWebRTC = () => {
     return pc;
   };
 
+  const waitForStream = () => new Promise((resolve, reject) => {
+    if (localStreamRef.current) { resolve(localStreamRef.current); return; }
+    let attempts = 0;
+    const iv = setInterval(() => {
+      attempts++;
+      if (localStreamRef.current) { clearInterval(iv); resolve(localStreamRef.current); }
+      else if (attempts > 20) { clearInterval(iv); reject(new Error('stream timeout')); }
+    }, 200);
+  });
+
   const sendOffer = async (remoteUid, remoteDisplayName) => {
     if (makingOfferRef.current.has(remoteUid)) return;
-    const pc = createPeer(remoteUid, remoteDisplayName);
-    if (!pc) return;
     makingOfferRef.current.add(remoteUid);
     try {
+      // FIX: wait up to 4s for local stream before making offer
+      await waitForStream();
+      const pc = createPeer(remoteUid, remoteDisplayName);
+      if (!pc) return;
       const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
       await pc.setLocalDescription(offer);
       const roomId = getRoomId();
       if (roomId) socket$().emit('offer', { targetUid: remoteUid, offer: pc.localDescription, roomId });
+      console.log('[WebRTC] offer sent to', remoteDisplayName);
     } catch (err) {
       console.error('[WebRTC] sendOffer error:', err);
     } finally {
