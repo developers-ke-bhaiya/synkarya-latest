@@ -252,29 +252,40 @@ export const useDirectCall = () => {
       setIncomingCall({ fromUid, fromDisplayName, fromAvatar });
     };
 
-    // CALLER: acceptor accepted → build PC and send offer
+    // CALLER: acceptor accepted → build PC immediately and send offer
     const onAccepted = async ({ fromUid, fromDisplayName }) => {
       useOnlineStore.getState().setDirectCallStatus('connected');
-      try {
-        const stream = await getMedia();
+
+      // FIX: Build PC FIRST (same pattern as acceptCall)
+      const { pc, remoteStream } = buildPC(fromUid);
+
+      useOnlineStore.setState(s => ({
+        activeDirectCall: s.activeDirectCall
+          ? { ...s.activeDirectCall, remoteStream, pc }
+          : { peerUid: fromUid, peerName: fromDisplayName, peerAvatar: null, localStream: null, remoteStream, pc },
+      }));
+
+      // Get media in background
+      getMedia().then(stream => {
         localStreamRef.current = stream;
-
-        const { pc, remoteStream } = buildPC(fromUid);
-        stream.getTracks().forEach(t => pc.addTrack(t, stream));
-
+        stream.getTracks().forEach(t => {
+          try { pc.addTrack(t, stream); } catch {}
+        });
         useOnlineStore.setState(s => ({
           activeDirectCall: s.activeDirectCall
-            ? { ...s.activeDirectCall, localStream: stream, remoteStream, pc }
-            : { peerUid: fromUid, peerName: fromDisplayName, peerAvatar: null, localStream: stream, remoteStream, pc },
+            ? { ...s.activeDirectCall, localStream: stream }
+            : s.activeDirectCall,
         }));
+      }).catch(err => console.error('[DC] getMedia error:', err));
 
-        // Caller creates and sends offer
+      // Send offer immediately (with tracks that exist so far)
+      try {
         const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
         await pc.setLocalDescription(offer);
         socket.emit('direct_offer', { targetUid: fromUid, offer: pc.localDescription });
         console.log('[DC] offer sent to', fromDisplayName);
       } catch (err) {
-        console.error('[DC] onAccepted error:', err);
+        console.error('[DC] onAccepted createOffer error:', err);
         clearActiveDirectCall();
       }
     };
