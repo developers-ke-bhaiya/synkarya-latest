@@ -136,26 +136,35 @@ export const useDirectCall = () => {
   const acceptCall = useCallback(async (fromUid, fromDisplayName, fromAvatar) => {
     clearIncomingCall();
     setDirectCallStatus('connected');
+
+    // FIX: Build PC FIRST before getting media
+    // This ensures PC is ready when offer arrives (no race condition)
+    const { pc, remoteStream } = buildPC(fromUid);
+
+    // Set active call immediately so UI shows
+    setActiveDirectCall({
+      peerUid: fromUid, peerName: fromDisplayName, peerAvatar: fromAvatar,
+      localStream: null, remoteStream, pc,
+    });
+
+    // Tell caller we accepted IMMEDIATELY — they will send offer
+    getSocket$().emit('direct_call_accept', { targetUid: fromUid });
+
+    // NOW get media (async) — PC is already set up
     try {
       const stream = await getMedia();
       localStreamRef.current = stream;
-
-      const { pc, remoteStream } = buildPC(fromUid);
-      // Add local tracks so they go to caller when offer/answer completes
+      // Add tracks to existing PC
       stream.getTracks().forEach(t => pc.addTrack(t, stream));
-
-      setActiveDirectCall({
-        peerUid: fromUid, peerName: fromDisplayName, peerAvatar: fromAvatar,
-        localStream: stream, remoteStream, pc,
-      });
-
-      // Tell caller we accepted — they will now send us an offer
-      getSocket$().emit('direct_call_accept', { targetUid: fromUid });
+      // Update local stream in state
+      useOnlineStore.setState(s => ({
+        activeDirectCall: s.activeDirectCall
+          ? { ...s.activeDirectCall, localStream: stream }
+          : s.activeDirectCall,
+      }));
     } catch (err) {
-      console.error('[DC] acceptCall error:', err);
-      getSocket$().emit('direct_call_reject', { targetUid: fromUid });
-      clearIncomingCall();
-      setDirectCallStatus(null);
+      console.error('[DC] getMedia error (continuing without camera):', err);
+      // Continue call without camera — user can still hear/see remote
     }
   }, [clearIncomingCall, setDirectCallStatus, setActiveDirectCall]);
 
