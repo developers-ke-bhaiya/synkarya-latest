@@ -24,6 +24,17 @@ export const playNotificationSound = () => {
   } catch {}
 };
 
+// ── MODULE-LEVEL REFS — shared across ALL hook instances ────────────────────
+// This is critical: multiple components call useDirectCall() but they must
+// all share the same PC, streams, and state.
+const _pcRef = { current: null };
+const _localStreamRef = { current: null };
+const _screenStreamRef = { current: null };
+const _remoteStreamRef = { current: null };
+const _iceQueueRef = { current: [] };
+const _remoteDescReadyRef = { current: false };
+const _pendingOfferRef = { current: null };
+
 export const useDirectCall = () => {
   const {
     setIncomingCall, clearIncomingCall,
@@ -32,13 +43,14 @@ export const useDirectCall = () => {
     setDirectScreenSharing, setPeerMediaState, addDirectMessage,
   } = useOnlineStore();
 
-  const pcRef = useRef(null);
-  const localStreamRef = useRef(null);
-  const screenStreamRef = useRef(null);
-  const remoteStreamRef = useRef(null);
-  const iceQueueRef = useRef([]);
-  const remoteDescReadyRef = useRef(false);
-  const pendingOfferRef = useRef(null); // stores offer if it arrives before PC is ready
+  // Use module-level refs (not useRef) so all instances share state
+  const pcRef = _pcRef;
+  const localStreamRef = _localStreamRef;
+  const screenStreamRef = _screenStreamRef;
+  const remoteStreamRef = _remoteStreamRef;
+  const iceQueueRef = _iceQueueRef;
+  const remoteDescReadyRef = _remoteDescReadyRef;
+  const pendingOfferRef = _pendingOfferRef;
 
   const getSocket$ = () => getSocket();
 
