@@ -101,24 +101,6 @@ export const useDirectCall = () => {
       if (pc.iceConnectionState === 'failed') pc.restartIce();
     };
 
-    // FIX: if offer arrived before PC was ready, process it now
-    if (pendingOfferRef.current) {
-      const { offer, fromUid } = pendingOfferRef.current;
-      pendingOfferRef.current = null;
-      console.log('[DC] processing pending offer from', fromUid);
-      setTimeout(async () => {
-        try {
-          await pc.setRemoteDescription(new RTCSessionDescription(offer));
-          remoteDescReadyRef.current = true;
-          await flushIce(pc);
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          getSocket$().emit('direct_answer', { targetUid: fromUid, answer: pc.localDescription });
-          console.log('[DC] pending offer processed, answer sent');
-        } catch (err) { console.error('[DC] pending offer error:', err); }
-      }, 0);
-    }
-
     return { pc, remoteStream: rs };
   };
 
@@ -150,22 +132,34 @@ export const useDirectCall = () => {
     // Tell caller we accepted IMMEDIATELY — they will send offer
     getSocket$().emit('direct_call_accept', { targetUid: fromUid });
 
-    // NOW get media (async) — PC is already set up
-    try {
-      const stream = await getMedia();
+    // Process any offer that arrived while we were setting up
+    const processPending = async () => {
+      if (!pendingOfferRef.current) return;
+      const { offer, fromUid: offerFromUid } = pendingOfferRef.current;
+      pendingOfferRef.current = null;
+      console.log('[DC] processing pending offer from', offerFromUid);
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        remoteDescReadyRef.current = true;
+        await flushIce(pc);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        getSocket$().emit('direct_answer', { targetUid: offerFromUid, answer: pc.localDescription });
+        console.log('[DC] pending offer processed, answer sent');
+      } catch (err) { console.error('[DC] pending offer error:', err); }
+    };
+    processPending();
+
+    // Get media in background
+    getMedia().then(stream => {
       localStreamRef.current = stream;
-      // Add tracks to existing PC
-      stream.getTracks().forEach(t => pc.addTrack(t, stream));
-      // Update local stream in state
+      stream.getTracks().forEach(t => { try { pc.addTrack(t, stream); } catch {} });
       useOnlineStore.setState(s => ({
         activeDirectCall: s.activeDirectCall
           ? { ...s.activeDirectCall, localStream: stream }
           : s.activeDirectCall,
       }));
-    } catch (err) {
-      console.error('[DC] getMedia error (continuing without camera):', err);
-      // Continue call without camera — user can still hear/see remote
-    }
+    }).catch(err => console.error('[DC] getMedia error:', err));
   }, [clearIncomingCall, setDirectCallStatus, setActiveDirectCall]);
 
   const rejectCall = useCallback((fromUid) => {
