@@ -288,13 +288,23 @@ export const useDirectCall = () => {
 
     // ACCEPTOR: receives offer → creates answer
     const onDirectOffer = async ({ offer, fromUid }) => {
-      const pc = pcRef.current;
+      // FIX: Wait up to 3 seconds for PC to be ready
+      const waitForPC = () => new Promise((resolve) => {
+        if (pcRef.current) { resolve(pcRef.current); return; }
+        let tries = 0;
+        const iv = setInterval(() => {
+          tries++;
+          if (pcRef.current) { clearInterval(iv); resolve(pcRef.current); }
+          else if (tries > 15) { clearInterval(iv); resolve(null); } // give up after 3s
+        }, 200);
+      });
+
+      const pc = await waitForPC();
       if (!pc) {
-        // PC not ready yet (acceptCall still getting camera) — queue the offer
-        console.log('[DC] PC not ready, queuing offer from', fromUid);
-        pendingOfferRef.current = { offer, fromUid };
+        console.error('[DC] PC never became ready, dropping offer from', fromUid);
         return;
       }
+      console.log('[DC] processing offer from', fromUid, 'signalingState:', pc.signalingState);
       try {
         if (pc.signalingState !== 'stable') {
           console.warn('[DC] Bad state for offer:', pc.signalingState);
