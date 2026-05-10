@@ -89,20 +89,27 @@ export const useDirectCall = () => {
     remoteStreamRef.current = rs;
 
     pc.ontrack = ({ track }) => {
-      console.log('[DC] ontrack:', track.kind, track.readyState);
+      console.log('[DC] ontrack:', track.kind, track.readyState, 'enabled:', track.enabled);
+      track.enabled = true; // ensure track is enabled
       if (!rs.getTracks().find(t => t.id === track.id)) rs.addTrack(track);
-      // FIX: force update even if remoteStream ref is same object
+      // Force React re-render
       useOnlineStore.setState(s => ({
         activeDirectCall: s.activeDirectCall
           ? { ...s.activeDirectCall, remoteStream: rs, _trackUpdate: Date.now() }
           : { peerUid: peerUid, peerName: '', peerAvatar: null, localStream: null, remoteStream: rs, pc, _trackUpdate: Date.now() },
       }));
-      // Poll to keep video showing even if readyState changes
       track.onunmute = () => {
+        console.log('[DC] track unmuted:', track.kind);
         useOnlineStore.setState(s => ({
           activeDirectCall: s.activeDirectCall ? { ...s.activeDirectCall, _trackUpdate: Date.now() } : s.activeDirectCall,
         }));
       };
+      // Retry state update after delay to catch late rendering
+      setTimeout(() => {
+        useOnlineStore.setState(s => ({
+          activeDirectCall: s.activeDirectCall ? { ...s.activeDirectCall, _trackUpdate: Date.now() } : s.activeDirectCall,
+        }));
+      }, 1000);
     };
 
     pc.onicecandidate = ({ candidate }) => {
