@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect } from 'react';
 import { useOnlineStore } from '../store/onlineStore';
 import { useAuthStore } from '../store/authStore';
 import { getSocket } from '../services/socket';
@@ -24,16 +24,95 @@ export const playNotificationSound = () => {
   } catch {}
 };
 
-// ── MODULE-LEVEL REFS — shared across ALL hook instances ────────────────────
-// This is critical: multiple components call useDirectCall() but they must
-// all share the same PC, streams, and state.
-const _pcRef = { current: null };
-const _localStreamRef = { current: null };
-const _screenStreamRef = { current: null };
-const _remoteStreamRef = { current: null };
-const _iceQueueRef = { current: [] };
-const _remoteDescReadyRef = { current: false };
-const _pendingOfferRef = { current: null };
+// ── MODULE-LEVEL SINGLETONS — shared across ALL hook instances ───────────────
+const S = {
+  pc: null,
+  localStream: null,
+  screenStream: null,
+  remoteStream: null,
+  iceQueue: [],
+  remoteDescReady: false,
+};
+
+const socket$ = () => getSocket();
+
+const getMedia = async () => {
+  try { return await getUserMedia({ video: true, audio: true }); }
+  catch { 
+    try { return await getUserMedia({ video: false, audio: true }); }
+    catch (e) { console.error('[DC] getMedia failed:', e); return null; }
+  }
+};
+
+const flushIce = async (pc) => {
+  const q = S.iceQueue.splice(0);
+  for (const c of q) {
+    try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
+  }
+};
+
+const cleanupAll = () => {
+  if (S.pc) { try { S.pc.close(); } catch {} S.pc = null; }
+  if (S.localStream) { stopStream(S.localStream); S.localStream = null; }
+  if (S.screenStream) { stopStream(S.screenStream); S.screenStream = null; }
+  S.remoteStream = null;
+  S.iceQueue = [];
+  S.remoteDescReady = false;
+};
+
+// Creates PC, wires ontrack/ICE — called with peerUid for ICE routing
+const buildPC = (peerUid, localStream) => {
+  if (S.pc) { try { S.pc.close(); } catch {} }
+  S.remoteDescReady = false;
+  S.iceQueue = [];
+
+  const pc = createPeerConnection();
+  S.pc = pc;
+
+  const rs = new MediaStream();
+  S.remoteStream = rs;
+
+  // Add local tracks immediately
+  if (localStream) {
+    localStream.getTracks().forEach(t => {
+      try { pc.addTrack(t, localStream); } catch {}
+    });
+  }
+
+  pc.ontrack = ({ track }) => {
+    console.log('[DC] ontrack:', track.kind, track.readyState);
+    track.enabled = true;
+    if (!rs.getTracks().find(t => t.id === track.id)) rs.addTrack(track);
+    // Force re-render — spread to new object so React sees change
+    useOnlineStore.setState(s => ({
+      activeDirectCall: s.activeDirectCall
+        ? { ...s.activeDirectCall, remoteStream: rs, _t: Date.now() }
+        : s.activeDirectCall,
+    }));
+    track.onunmute = () => {
+      useOnlineStore.setState(s => ({
+        activeDirectCall: s.activeDirectCall
+          ? { ...s.activeDirectCall, _t: Date.now() }
+          : s.activeDirectCall,
+      }));
+    };
+  };
+
+  pc.onicecandidate = ({ candidate }) => {
+    if (candidate) socket$().emit('direct_ice_candidate', { targetUid: peerUid, candidate });
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    console.log('[DC] ICE:', pc.iceConnectionState);
+    if (pc.iceConnectionState === 'failed') pc.restartIce();
+  };
+
+  pc.onconnectionstatechange = () => {
+    console.log('[DC] Conn:', pc.connectionState);
+  };
+
+  return { pc, remoteStream: rs };
+};
 
 export const useDirectCall = () => {
   const {
@@ -43,89 +122,8 @@ export const useDirectCall = () => {
     setDirectScreenSharing, setPeerMediaState, addDirectMessage,
   } = useOnlineStore();
 
-  // Use module-level refs (not useRef) so all instances share state
-  const pcRef = _pcRef;
-  const localStreamRef = _localStreamRef;
-  const screenStreamRef = _screenStreamRef;
-  const remoteStreamRef = _remoteStreamRef;
-  const iceQueueRef = _iceQueueRef;
-  const remoteDescReadyRef = _remoteDescReadyRef;
-  const pendingOfferRef = _pendingOfferRef;
-
-  const getSocket$ = () => getSocket();
-
-  const flushIce = async (pc) => {
-    const q = iceQueueRef.current.splice(0);
-    for (const c of q) {
-      try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
-    }
-  };
-
-  const cleanupPC = () => {
-    if (pcRef.current) { try { pcRef.current.close(); } catch {} pcRef.current = null; }
-    if (localStreamRef.current) { stopStream(localStreamRef.current); localStreamRef.current = null; }
-    if (screenStreamRef.current) { stopStream(screenStreamRef.current); screenStreamRef.current = null; }
-    remoteStreamRef.current = null;
-    remoteDescReadyRef.current = false;
-    iceQueueRef.current = [];
-    pendingOfferRef.current = null;
-  };
-
-  const getMedia = async () => {
-    try { return await getUserMedia({ video: true, audio: true }); }
-    catch { return await getUserMedia({ video: false, audio: true }); }
-  };
-
-  // Creates a fresh PeerConnection for a direct call
-  const buildPC = (peerUid) => {
-    if (pcRef.current) { try { pcRef.current.close(); } catch {} }
-    remoteDescReadyRef.current = false;
-    iceQueueRef.current = [];
-
-    const pc = createPeerConnection();
-    pcRef.current = pc;
-
-    const rs = new MediaStream();
-    remoteStreamRef.current = rs;
-
-    pc.ontrack = ({ track }) => {
-      console.log('[DC] ontrack:', track.kind, track.readyState, 'enabled:', track.enabled);
-      track.enabled = true; // ensure track is enabled
-      if (!rs.getTracks().find(t => t.id === track.id)) rs.addTrack(track);
-      // Force React re-render
-      useOnlineStore.setState(s => ({
-        activeDirectCall: s.activeDirectCall
-          ? { ...s.activeDirectCall, remoteStream: rs, _trackUpdate: Date.now() }
-          : { peerUid: peerUid, peerName: '', peerAvatar: null, localStream: null, remoteStream: rs, pc, _trackUpdate: Date.now() },
-      }));
-      track.onunmute = () => {
-        console.log('[DC] track unmuted:', track.kind);
-        useOnlineStore.setState(s => ({
-          activeDirectCall: s.activeDirectCall ? { ...s.activeDirectCall, _trackUpdate: Date.now() } : s.activeDirectCall,
-        }));
-      };
-      // Retry state update after delay to catch late rendering
-      setTimeout(() => {
-        useOnlineStore.setState(s => ({
-          activeDirectCall: s.activeDirectCall ? { ...s.activeDirectCall, _trackUpdate: Date.now() } : s.activeDirectCall,
-        }));
-      }, 1000);
-    };
-
-    pc.onicecandidate = ({ candidate }) => {
-      if (candidate) getSocket$().emit('direct_ice_candidate', { targetUid: peerUid, candidate });
-    };
-
-    pc.oniceconnectionstatechange = () => {
-      if (pc.iceConnectionState === 'failed') pc.restartIce();
-    };
-
-    return { pc, remoteStream: rs };
-  };
-
-  // ── Public API ─────────────────────────────────────────────────────────────
   const requestCall = useCallback((targetUid, targetName, targetAvatar) => {
-    getSocket$().emit('direct_call_request', { targetUid });
+    socket$().emit('direct_call_request', { targetUid });
     useOnlineStore.getState().setDirectCallStatus('calling');
     useOnlineStore.getState().setActiveDirectCall({
       peerUid: targetUid, peerName: targetName, peerAvatar: targetAvatar,
@@ -133,87 +131,59 @@ export const useDirectCall = () => {
     });
   }, []);
 
-  // ACCEPTOR: gets camera, builds PC, waits for offer from caller
+  // ACCEPTOR: get media → build PC with tracks → emit accept → wait for offer
   const acceptCall = useCallback(async (fromUid, fromDisplayName, fromAvatar) => {
     clearIncomingCall();
     setDirectCallStatus('connected');
 
-    // FIX: Build PC FIRST before getting media
-    // This ensures PC is ready when offer arrives (no race condition)
-    const { pc, remoteStream } = buildPC(fromUid);
+    // Get media FIRST so tracks are ready
+    const stream = await getMedia();
+    S.localStream = stream;
 
-    // Set active call immediately so UI shows
+    const { pc, remoteStream } = buildPC(fromUid, stream);
+
     setActiveDirectCall({
       peerUid: fromUid, peerName: fromDisplayName, peerAvatar: fromAvatar,
-      localStream: null, remoteStream, pc,
+      localStream: stream, remoteStream, pc,
     });
 
-    // Tell caller we accepted IMMEDIATELY — they will send offer
-    getSocket$().emit('direct_call_accept', { targetUid: fromUid });
-
-    // Process any offer that arrived while we were setting up
-    const processPending = async () => {
-      if (!pendingOfferRef.current) return;
-      const { offer, fromUid: offerFromUid } = pendingOfferRef.current;
-      pendingOfferRef.current = null;
-      console.log('[DC] processing pending offer from', offerFromUid);
-      try {
-        await pc.setRemoteDescription(new RTCSessionDescription(offer));
-        remoteDescReadyRef.current = true;
-        await flushIce(pc);
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        getSocket$().emit('direct_answer', { targetUid: offerFromUid, answer: pc.localDescription });
-        console.log('[DC] pending offer processed, answer sent');
-      } catch (err) { console.error('[DC] pending offer error:', err); }
-    };
-    processPending();
-
-    // Get media in background
-    getMedia().then(stream => {
-      localStreamRef.current = stream;
-      stream.getTracks().forEach(t => { try { pc.addTrack(t, stream); } catch {} });
-      useOnlineStore.setState(s => ({
-        activeDirectCall: s.activeDirectCall
-          ? { ...s.activeDirectCall, localStream: stream }
-          : s.activeDirectCall,
-      }));
-    }).catch(err => console.error('[DC] getMedia error:', err));
+    // NOW tell caller — they will send offer, PC + tracks are ready
+    socket$().emit('direct_call_accept', { targetUid: fromUid });
   }, [clearIncomingCall, setDirectCallStatus, setActiveDirectCall]);
 
   const rejectCall = useCallback((fromUid) => {
-    getSocket$().emit('direct_call_reject', { targetUid: fromUid });
+    socket$().emit('direct_call_reject', { targetUid: fromUid });
     clearIncomingCall();
     setDirectCallStatus(null);
   }, [clearIncomingCall, setDirectCallStatus]);
 
   const endDirectCall = useCallback(() => {
     const { activeDirectCall } = useOnlineStore.getState();
-    if (activeDirectCall?.peerUid) getSocket$().emit('direct_call_end', { targetUid: activeDirectCall.peerUid });
-    cleanupPC();
+    if (activeDirectCall?.peerUid) socket$().emit('direct_call_end', { targetUid: activeDirectCall.peerUid });
+    cleanupAll();
     clearActiveDirectCall();
   }, [clearActiveDirectCall]);
 
   const toggleDirectAudio = useCallback(() => {
     const { directAudioEnabled, directVideoEnabled, directScreenSharing, activeDirectCall } = useOnlineStore.getState();
     const newVal = !directAudioEnabled;
-    localStreamRef.current?.getAudioTracks().forEach(t => { t.enabled = newVal; });
+    S.localStream?.getAudioTracks().forEach(t => { t.enabled = newVal; });
     setDirectAudioEnabled(newVal);
     if (activeDirectCall?.peerUid) {
-      getSocket$().emit('direct_media_state', { targetUid: activeDirectCall.peerUid, audioEnabled: newVal, videoEnabled: directVideoEnabled, screenSharing: directScreenSharing });
+      socket$().emit('direct_media_state', { targetUid: activeDirectCall.peerUid, audioEnabled: newVal, videoEnabled: directVideoEnabled, screenSharing: directScreenSharing });
     }
   }, [setDirectAudioEnabled]);
 
   const toggleDirectVideo = useCallback(() => {
     const { directAudioEnabled, directVideoEnabled, directScreenSharing, activeDirectCall } = useOnlineStore.getState();
     const newVal = !directVideoEnabled;
-    localStreamRef.current?.getVideoTracks().forEach(t => { t.enabled = newVal; });
+    S.localStream?.getVideoTracks().forEach(t => { t.enabled = newVal; });
     setDirectVideoEnabled(newVal);
     useOnlineStore.setState(s => ({
       activeDirectCall: s.activeDirectCall ? { ...s.activeDirectCall, _vt: Date.now() } : s.activeDirectCall,
     }));
     if (activeDirectCall?.peerUid) {
-      getSocket$().emit('direct_media_state', { targetUid: activeDirectCall.peerUid, audioEnabled: directAudioEnabled, videoEnabled: newVal, screenSharing: directScreenSharing });
+      socket$().emit('direct_media_state', { targetUid: activeDirectCall.peerUid, audioEnabled: directAudioEnabled, videoEnabled: newVal, screenSharing: directScreenSharing });
     }
   }, [setDirectVideoEnabled]);
 
@@ -221,12 +191,12 @@ export const useDirectCall = () => {
     const { directAudioEnabled, activeDirectCall } = useOnlineStore.getState();
     try {
       const ss = await getDisplayMedia();
-      screenStreamRef.current = ss;
+      S.screenStream = ss;
       const track = ss.getVideoTracks()[0];
-      if (pcRef.current) await replaceTrackOnPeer(pcRef.current, track);
+      if (S.pc) await replaceTrackOnPeer(S.pc, track);
       setDirectScreenSharing(true);
       if (activeDirectCall?.peerUid) {
-        getSocket$().emit('direct_media_state', { targetUid: activeDirectCall.peerUid, audioEnabled: directAudioEnabled, videoEnabled: true, screenSharing: true });
+        socket$().emit('direct_media_state', { targetUid: activeDirectCall.peerUid, audioEnabled: directAudioEnabled, videoEnabled: true, screenSharing: true });
       }
       track.onended = () => stopDirectScreenShare();
     } catch (err) { console.error('[DC] screenShare:', err); }
@@ -234,12 +204,12 @@ export const useDirectCall = () => {
 
   const stopDirectScreenShare = useCallback(async () => {
     const { directAudioEnabled, directVideoEnabled, activeDirectCall } = useOnlineStore.getState();
-    if (screenStreamRef.current) { stopStream(screenStreamRef.current); screenStreamRef.current = null; }
-    const cam = localStreamRef.current?.getVideoTracks()[0];
-    if (cam && pcRef.current) { cam.enabled = true; await replaceTrackOnPeer(pcRef.current, cam); }
+    if (S.screenStream) { stopStream(S.screenStream); S.screenStream = null; }
+    const cam = S.localStream?.getVideoTracks()[0];
+    if (cam && S.pc) { cam.enabled = true; await replaceTrackOnPeer(S.pc, cam); }
     setDirectScreenSharing(false);
     if (activeDirectCall?.peerUid) {
-      getSocket$().emit('direct_media_state', { targetUid: activeDirectCall.peerUid, audioEnabled: directAudioEnabled, videoEnabled: directVideoEnabled, screenSharing: false });
+      socket$().emit('direct_media_state', { targetUid: activeDirectCall.peerUid, audioEnabled: directAudioEnabled, videoEnabled: directVideoEnabled, screenSharing: false });
     }
   }, [setDirectScreenSharing]);
 
@@ -248,121 +218,95 @@ export const useDirectCall = () => {
     if (!activeDirectCall?.peerUid || !message?.trim()) return;
     const { user } = useAuthStore.getState();
     const msg = {
-      id: Date.now().toString() + '_local',
+      id: Date.now().toString() + Math.random(),
       uid: user?.uid, displayName: user?.displayName,
       message: message.trim(), timestamp: new Date().toISOString(),
     };
     addDirectMessage(msg);
-    getSocket$().emit('direct_chat_message', { targetUid: activeDirectCall.peerUid, message: message.trim() });
+    socket$().emit('direct_chat_message', { targetUid: activeDirectCall.peerUid, message: message.trim() });
   }, [addDirectMessage]);
 
-  // ── Socket listeners — mounted ONCE ───────────────────────────────────────
+  // ── Socket listeners — ONE instance, mount once ──────────────────────────
   useEffect(() => {
-    const socket = getSocket$();
+    const socket = socket$();
 
     const onIncoming = ({ fromUid, fromDisplayName, fromAvatar }) => {
       playNotificationSound();
       setIncomingCall({ fromUid, fromDisplayName, fromAvatar });
     };
 
-    // CALLER: acceptor accepted → build PC immediately and send offer
+    // CALLER: acceptor accepted → get media → build PC with tracks → send offer
     const onAccepted = async ({ fromUid, fromDisplayName }) => {
       useOnlineStore.getState().setDirectCallStatus('connected');
 
-      // FIX: Build PC FIRST (same pattern as acceptCall)
-      const { pc, remoteStream } = buildPC(fromUid);
+      // Get media FIRST — tracks must be in offer SDP
+      const stream = await getMedia();
+      S.localStream = stream;
+
+      const { pc, remoteStream } = buildPC(fromUid, stream);
 
       useOnlineStore.setState(s => ({
         activeDirectCall: s.activeDirectCall
-          ? { ...s.activeDirectCall, remoteStream, pc }
-          : { peerUid: fromUid, peerName: fromDisplayName, peerAvatar: null, localStream: null, remoteStream, pc },
+          ? { ...s.activeDirectCall, localStream: stream, remoteStream, pc }
+          : { peerUid: fromUid, peerName: fromDisplayName, peerAvatar: null, localStream: stream, remoteStream, pc },
       }));
 
-      // Get media in background
-      getMedia().then(stream => {
-        localStreamRef.current = stream;
-        stream.getTracks().forEach(t => {
-          try { pc.addTrack(t, stream); } catch {}
-        });
-        useOnlineStore.setState(s => ({
-          activeDirectCall: s.activeDirectCall
-            ? { ...s.activeDirectCall, localStream: stream }
-            : s.activeDirectCall,
-        }));
-      }).catch(err => console.error('[DC] getMedia error:', err));
-
-      // Send offer immediately (with tracks that exist so far)
+      // Create offer WITH tracks
       try {
         const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
         await pc.setLocalDescription(offer);
         socket.emit('direct_offer', { targetUid: fromUid, offer: pc.localDescription });
-        console.log('[DC] offer sent to', fromDisplayName);
+        console.log('[DC] offer sent to', fromDisplayName, '| senders:', pc.getSenders().map(s => s.track?.kind).filter(Boolean));
       } catch (err) {
-        console.error('[DC] onAccepted createOffer error:', err);
+        console.error('[DC] onAccepted error:', err);
         clearActiveDirectCall();
       }
     };
 
-    const onRejected = () => { clearActiveDirectCall(); useOnlineStore.getState().setDirectCallStatus(null); };
+    const onRejected = () => {
+      clearActiveDirectCall();
+      useOnlineStore.getState().setDirectCallStatus(null);
+    };
 
-    // ACCEPTOR: receives offer → creates answer
+    // ACCEPTOR: receives offer → set remote desc → create answer
     const onDirectOffer = async ({ offer, fromUid }) => {
-      // FIX: Wait up to 3 seconds for PC to be ready
-      const waitForPC = () => new Promise((resolve) => {
-        if (pcRef.current) { resolve(pcRef.current); return; }
-        let tries = 0;
-        const iv = setInterval(() => {
-          tries++;
-          if (pcRef.current) { clearInterval(iv); resolve(pcRef.current); }
-          else if (tries > 15) { clearInterval(iv); resolve(null); } // give up after 3s
-        }, 200);
-      });
-
-      const pc = await waitForPC();
-      if (!pc) {
-        console.error('[DC] PC never became ready, dropping offer from', fromUid);
-        return;
-      }
-      console.log('[DC] processing offer from', fromUid, 'signalingState:', pc.signalingState);
+      console.log('[DC] offer received from', fromUid, '| PC:', !!S.pc);
+      const pc = S.pc;
+      if (!pc) { console.error('[DC] No PC for offer!'); return; }
+      if (pc.signalingState !== 'stable') { console.warn('[DC] Bad state:', pc.signalingState); return; }
       try {
-        if (pc.signalingState !== 'stable') {
-          console.warn('[DC] Bad state for offer:', pc.signalingState);
-          return;
-        }
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
-        remoteDescReadyRef.current = true;
+        S.remoteDescReady = true;
         await flushIce(pc);
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         socket.emit('direct_answer', { targetUid: fromUid, answer: pc.localDescription });
-        console.log('[DC] answer sent to', fromUid);
+        console.log('[DC] answer sent | senders:', pc.getSenders().map(s => s.track?.kind).filter(Boolean));
       } catch (err) { console.error('[DC] onOffer error:', err); }
     };
 
     // CALLER: receives answer
     const onDirectAnswer = async ({ answer }) => {
-      const pc = pcRef.current;
-      if (!pc || pc.remoteDescription) return;
+      const pc = S.pc;
+      if (!pc || pc.remoteDescription) { console.warn('[DC] Skipping answer, already have remoteDesc'); return; }
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
-        remoteDescReadyRef.current = true;
+        S.remoteDescReady = true;
         await flushIce(pc);
-        console.log('[DC] answer received, connection establishing...');
+        console.log('[DC] answer set, ICE negotiating...');
       } catch (err) { console.error('[DC] onAnswer error:', err); }
     };
 
     const onDirectIce = async ({ candidate }) => {
-      if (!candidate) return;
-      const pc = pcRef.current;
-      if (!pc) return;
-      if (remoteDescReadyRef.current && pc.remoteDescription) {
-        try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
+      if (!candidate || !S.pc) return;
+      if (S.remoteDescReady && S.pc.remoteDescription) {
+        try { await S.pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
       } else {
-        iceQueueRef.current.push(candidate);
+        S.iceQueue.push(candidate);
       }
     };
 
-    const onCallEnded = () => { cleanupPC(); clearActiveDirectCall(); };
+    const onCallEnded = () => { cleanupAll(); clearActiveDirectCall(); };
 
     const onPeerMedia = ({ uid, audioEnabled, videoEnabled, screenSharing }) => {
       setPeerMediaState(uid, { audioEnabled, videoEnabled, screenSharing });
