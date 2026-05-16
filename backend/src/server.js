@@ -29,6 +29,8 @@ const isAllowedOrigin = (origin) => {
   if (origin.includes('127.0.0.1')) return true;
   if (origin.endsWith('.vercel.app')) return true;
   if (origin.endsWith('.onrender.com')) return true;
+  if (origin.endsWith('.thedevelopers.co.in')) return true;
+  if (origin.endsWith('thedevelopers.co.in')) return true;
   if (process.env.FRONTEND_URL && origin.startsWith(process.env.FRONTEND_URL)) return true;
   return false;
 };
