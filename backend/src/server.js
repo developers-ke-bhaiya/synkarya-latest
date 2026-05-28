@@ -25,6 +25,10 @@ const app = express();
 
 const isAllowedOrigin = (origin) => {
   if (!origin) return true;
+  if (origin === 'capacitor://localhost') return true;
+  if (origin === 'ionic://localhost') return true;
+  if (origin === 'app://localhost') return true;
+  if (origin.startsWith('file://')) return true;
   if (origin.includes('localhost')) return true;
   if (origin.includes('127.0.0.1')) return true;
   if (origin.endsWith('.vercel.app')) return true;

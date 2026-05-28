@@ -16,7 +16,7 @@ const setupSocketHandlers = (io) => {
 
   io.on('connection', async (socket) => {
     if (!socket.user?.uid) { socket.disconnect(true); return; }
-    const { uid, displayName, avatar } = socket.user;
+    const { uid, displayName, avatar, email } = socket.user;
     console.log(`🔌 Connected: ${displayName} [${socket.id}]`);
 
     let currentStatus = null;
@@ -27,7 +27,7 @@ const setupSocketHandlers = (io) => {
       currentStatus = doc.data()?.currentStatus || null;
     } catch (err) { console.error('Connect DB error:', err.message); }
 
-    onlineUsers.set(uid, { uid, displayName, avatar, socketId: socket.id, status: currentStatus });
+    onlineUsers.set(uid, { uid, displayName, email, avatar, socketId: socket.id, status: currentStatus, connectedAt: new Date().toISOString() });
     broadcastOnline(io);
 
     // ── Status ────────────────────────────────────────────────────────────
@@ -52,7 +52,7 @@ const setupSocketHandlers = (io) => {
         }
       } catch (err) { console.error('update_status error:', err.message); }
       const u = onlineUsers.get(uid);
-      if (u) { u.status = status; onlineUsers.set(uid, u); }
+      if (u) { u.status = status; u.socketId = socket.id; onlineUsers.set(uid, u); }
       broadcastOnline(io);
     });
 
@@ -76,6 +76,10 @@ const setupSocketHandlers = (io) => {
 
       socket.emit('users_in_room', { users: peers });
       socket.to(roomId).emit('user_joined', { uid, displayName, avatar, socketId: socket.id });
+      io.in(roomId).emit('room_roster', {
+        roomId,
+        users: roomState.getRoomUsers(roomId).map(u => ({ uid: u.uid, displayName: u.displayName, socketId: u.socketId })),
+      });
     });
 
     socket.on('leave_room', async () => handleLeave(socket, io));
@@ -176,6 +180,12 @@ const setupSocketHandlers = (io) => {
     // ── Ping ─────────────────────────────────────────────────────────────
     socket.on('ping', () => {
       socket.emit('pong', { timestamp: Date.now() });
+      const u = onlineUsers.get(uid);
+      if (u) {
+        u.socketId = socket.id;
+        u.lastPing = new Date().toISOString();
+        onlineUsers.set(uid, u);
+      }
       socket.emit('online_users', Array.from(onlineUsers.values()));
     });
 
@@ -199,6 +209,10 @@ const handleLeave = async (socket, io) => {
   socket.leave(roomId);
   const leaveData = await recordLeave({ uid, roomId, sessionId });
   io.in(roomId).emit('user_left', { uid, displayName, leaveTime: leaveData?.leaveTime, durationSeconds: leaveData?.durationSeconds });
+  io.in(roomId).emit('room_roster', {
+    roomId,
+    users: roomState.getRoomUsers(roomId).map(u => ({ uid: u.uid, displayName: u.displayName, socketId: u.socketId })),
+  });
 };
 
 module.exports = { setupSocketHandlers };
