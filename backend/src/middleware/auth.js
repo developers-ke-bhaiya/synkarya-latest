@@ -51,4 +51,15 @@ const authenticateSocket = async (socket, next) => {
   }
 };
 
-module.exports = { authenticate, authenticateSocket };
+const LEADERSHIP_ROLES = new Set(['Founder', 'Co-founder', 'Admin', 'Chief Technology Officer']);
+
+const isLeadership = (user = {}) => LEADERSHIP_ROLES.has(user.role);
+
+const requireLeadership = (req, res, next) => {
+  if (!isLeadership(req.user)) {
+    return res.status(403).json({ error: 'Founder, Co-founder, Admin or CTO access required' });
+  }
+  next();
+};
+
+module.exports = { authenticate, authenticateSocket, isLeadership, requireLeadership };

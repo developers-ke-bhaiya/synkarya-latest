@@ -1,9 +1,87 @@
 const express = require('express');
 const router = express.Router();
-const { authenticate } = require('../middleware/auth');
+const { authenticate, isLeadership } = require('../middleware/auth');
 const { getDb } = require('../config/firebase');
 
 router.use(authenticate);
+
+const pickProfile = (d = {}) => ({
+  role: d.role || 'Member',
+  status: d.currentStatus || d.status || '',
+  avatarUrl: d.avatarUrl || d.avatar || '',
+  title: d.title || '',
+  department: d.department || '',
+  phone: d.phone || '',
+  location: d.location || '',
+  skills: d.skills || '',
+  github: d.github || '',
+  portfolio: d.portfolio || '',
+  bio: d.bio || '',
+});
+
+router.get('/profile', async (req, res) => {
+  try {
+    const safeUser = {
+      uid: req.user.uid,
+      email: req.user.email,
+      displayName: req.user.displayName,
+      avatar: req.user.avatarUrl || req.user.avatar,
+    };
+    return res.status(200).json({ user: safeUser, profile: pickProfile(req.user) });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/profile', async (req, res) => {
+  try {
+    const allowedRoles = new Set([
+      'Founder',
+      'Co-founder',
+      'Admin',
+      'Chief Technology Officer',
+      'Head of Engineering',
+      'Head of Media and Community',
+      'Member',
+      'Intern',
+      'Advisor',
+    ]);
+    const body = req.body || {};
+    const displayName = String(body.displayName || req.user.displayName || '').trim().slice(0, 80);
+    const currentRole = req.user.role || 'Member';
+    const requestedRole = allowedRoles.has(body.role) ? body.role : currentRole;
+    const role = isLeadership(req.user) ? requestedRole : currentRole;
+    const currentStatus = String(body.status || '').trim().slice(0, 120);
+    const update = {
+      displayName: displayName || req.user.displayName,
+      role,
+      currentStatus,
+      avatarUrl: String(body.avatarUrl || '').trim().slice(0, 500),
+      title: String(body.title || '').trim().slice(0, 100),
+      department: String(body.department || '').trim().slice(0, 100),
+      phone: String(body.phone || '').trim().slice(0, 50),
+      location: String(body.location || '').trim().slice(0, 100),
+      skills: String(body.skills || '').trim().slice(0, 300),
+      github: String(body.github || '').trim().slice(0, 250),
+      portfolio: String(body.portfolio || '').trim().slice(0, 250),
+      bio: String(body.bio || '').trim().slice(0, 800),
+      profileUpdatedAt: new Date().toISOString(),
+    };
+
+    const db = getDb();
+    await db.collection('users').doc(req.user.uid).set(update, { merge: true });
+    const user = {
+      uid: req.user.uid,
+      email: req.user.email,
+      displayName: update.displayName,
+      avatar: update.avatarUrl || req.user.avatar,
+    };
+    return res.status(200).json({ user, profile: pickProfile(update) });
+  } catch (err) {
+    console.error('Update profile error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 // Get all users who logged in today
 router.get('/online', async (req, res) => {
@@ -26,7 +104,10 @@ router.get('/online', async (req, res) => {
           uid: d.uid,
           displayName: d.displayName,
           email: d.email,
-          avatar: d.avatar,
+          avatar: d.avatarUrl || d.avatar,
+          role: d.role || 'Member',
+          title: d.title || '',
+          department: d.department || '',
           lastSeen: d.lastSeen,
           currentStatus: d.currentStatus || null,
           statusUpdatedAt: d.statusUpdatedAt || null,

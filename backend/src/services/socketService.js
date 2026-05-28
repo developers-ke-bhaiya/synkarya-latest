@@ -1,5 +1,6 @@
 const { v4: uuidv4 } = require('uuid');
 const { authenticateSocket } = require('../middleware/auth');
+const { isLeadership } = require('../middleware/auth');
 const { recordJoin, recordLeave } = require('./attendanceService');
 const roomState = require('./roomStateService');
 const { getDb } = require('../config/firebase');
@@ -46,6 +47,97 @@ const sendIncomingCallPush = async ({ targetUid, fromUid, fromDisplayName }) => 
     console.error('sendIncomingCallPush error:', err.message);
     return false;
   }
+};
+
+const getReachableUsers = async ({ excludeUid, scope, roomId }) => {
+  const db = getDb();
+  let allowedRoomUids = null;
+  if (scope === 'room' && roomId) {
+    allowedRoomUids = new Set(roomState.getRoomUsers(roomId).map((u) => u.uid));
+  }
+
+  const snapshot = await db.collection('users').where('reachable', '==', true).limit(300).get();
+  return snapshot.docs
+    .map((doc) => doc.data())
+    .filter((user) => user.uid && user.uid !== excludeUid)
+    .filter((user) => !user.explicitLogout && Object.keys(user.pushTokens || {}).length > 0)
+    .filter((user) => !allowedRoomUids || allowedRoomUids.has(user.uid));
+};
+
+const sendMeetingPush = async ({ users, meeting, fromDisplayName }) => {
+  const tokens = users.flatMap((user) => Object.keys(user.pushTokens || {}));
+  if (!tokens.length) return { success: 0, failure: 0 };
+  const isEmergency = meeting.type === 'emergency';
+  try {
+    const result = await admin.messaging().sendEachForMulticast({
+      tokens,
+      notification: {
+        title: isEmergency ? 'Emergency Synkarya meeting' : 'Synkarya meeting scheduled',
+        body: isEmergency
+          ? `${fromDisplayName || 'Leadership'} called: ${meeting.title}`
+          : `${meeting.title} has been scheduled`,
+      },
+      data: {
+        type: isEmergency ? 'emergency_meeting' : 'scheduled_meeting',
+        meetingId: meeting.id || '',
+        title: meeting.title || '',
+        scope: meeting.scope || '',
+        roomCode: meeting.roomCode || '',
+        startsAt: meeting.startsAt || '',
+        createdBy: fromDisplayName || '',
+      },
+      android: {
+        priority: 'high',
+        notification: {
+          channelId: isEmergency ? 'emergency' : 'default',
+          sound: 'default',
+          priority: 'high',
+          clickAction: isEmergency ? 'OPEN_EMERGENCY_MEETING' : 'OPEN_SYNKARYA_MEETING',
+        },
+      },
+    });
+    return { success: result.successCount, failure: result.failureCount };
+  } catch (err) {
+    console.error('sendMeetingPush error:', err.message);
+    return { success: 0, failure: tokens.length };
+  }
+};
+
+const saveAndBroadcastMeeting = async ({ io, socket, uid, displayName, meeting }) => {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const cleanMeeting = {
+    id: meeting.id || uuidv4(),
+    type: meeting.type === 'emergency' ? 'emergency' : 'scheduled',
+    title: String(meeting.title || 'Synkarya meeting').trim().slice(0, 120),
+    scope: meeting.scope || 'all',
+    roomId: meeting.roomId || null,
+    roomCode: meeting.roomCode || '',
+    startsAt: meeting.startsAt || null,
+    createdAt: meeting.createdAt || now,
+    createdBy: displayName,
+    createdByUid: uid,
+    status: meeting.type === 'emergency' ? 'active' : 'scheduled',
+  };
+
+  await db.collection('meetings').doc(cleanMeeting.id).set(cleanMeeting, { merge: true });
+  const reachableUsers = await getReachableUsers({ excludeUid: uid, scope: cleanMeeting.scope, roomId: cleanMeeting.roomId });
+  const push = await sendMeetingPush({ users: reachableUsers, meeting: cleanMeeting, fromDisplayName: displayName });
+
+  const onlinePayload = {
+    ...cleanMeeting,
+    message: cleanMeeting.type === 'emergency'
+      ? `${cleanMeeting.title} has been called`
+      : `${cleanMeeting.title} has been scheduled`,
+  };
+
+  if (cleanMeeting.scope === 'room' && cleanMeeting.roomId) {
+    socket.to(cleanMeeting.roomId).emit(cleanMeeting.type === 'emergency' ? 'emergency_meeting' : 'scheduled_meeting', onlinePayload);
+  } else {
+    socket.broadcast.emit(cleanMeeting.type === 'emergency' ? 'emergency_meeting' : 'scheduled_meeting', onlinePayload);
+  }
+
+  socket.emit('meeting_saved', { meeting: cleanMeeting, push });
 };
 
 const setupSocketHandlers = (io) => {
@@ -196,6 +288,48 @@ const setupSocketHandlers = (io) => {
 
     // FIX: DM uses separate event 'dm_message' — NOT 'direct_chat_message'
     // direct_chat_message is only for in-call private chat
+    socket.on('emergency_meeting', async (meeting = {}) => {
+      try {
+        if (!isLeadership(socket.user)) {
+          socket.emit('meeting_error', { message: 'Leadership access required' });
+          return;
+        }
+        await saveAndBroadcastMeeting({
+          io,
+          socket,
+          uid,
+          displayName,
+          meeting: { ...meeting, type: 'emergency' },
+        });
+      } catch (err) {
+        console.error('emergency_meeting error:', err.message);
+        socket.emit('meeting_error', { message: err.message || 'Could not create emergency meeting' });
+      }
+    });
+
+    socket.on('schedule_meeting', async (meeting = {}) => {
+      try {
+        if (!isLeadership(socket.user)) {
+          socket.emit('meeting_error', { message: 'Leadership access required' });
+          return;
+        }
+        if (!meeting.startsAt) {
+          socket.emit('meeting_error', { message: 'startsAt required' });
+          return;
+        }
+        await saveAndBroadcastMeeting({
+          io,
+          socket,
+          uid,
+          displayName,
+          meeting: { ...meeting, type: 'scheduled' },
+        });
+      } catch (err) {
+        console.error('schedule_meeting error:', err.message);
+        socket.emit('meeting_error', { message: err.message || 'Could not schedule meeting' });
+      }
+    });
+
     socket.on('dm_message', ({ targetUid, message }) => {
       const t = onlineUsers.get(targetUid);
       if (!t || !message?.trim()) return;

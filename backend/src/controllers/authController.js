@@ -38,6 +38,8 @@ const register = async (req, res) => {
       displayName: displayName.trim(),
       passwordHash,
       avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(displayName.trim())}`,
+      role: 'Member',
+      currentStatus: '',
       createdAt: new Date().toISOString(),
       lastSeen: new Date().toISOString(),
     };
@@ -49,6 +51,7 @@ const register = async (req, res) => {
       message: 'Account created successfully',
       token,
       user: { uid, email: userData.email, displayName: userData.displayName, avatar: userData.avatar },
+      profile: { role: userData.role, status: userData.currentStatus, avatarUrl: userData.avatar },
     });
   } catch (err) {
     console.error('Register error:', err.message);
@@ -91,7 +94,20 @@ const login = async (req, res) => {
     return res.status(200).json({
       message: 'Login successful',
       token,
-      user: { uid: userData.uid, email: userData.email, displayName: userData.displayName, avatar: userData.avatar },
+      user: { uid: userData.uid, email: userData.email, displayName: userData.displayName, avatar: userData.avatarUrl || userData.avatar },
+      profile: {
+        role: userData.role || 'Member',
+        status: userData.currentStatus || '',
+        avatarUrl: userData.avatarUrl || userData.avatar || '',
+        title: userData.title || '',
+        department: userData.department || '',
+        phone: userData.phone || '',
+        location: userData.location || '',
+        skills: userData.skills || '',
+        github: userData.github || '',
+        portfolio: userData.portfolio || '',
+        bio: userData.bio || '',
+      },
     });
   } catch (err) {
     console.error('Login error:', err.message);

@@ -1,10 +1,13 @@
 const express = require('express');
 const router = express.Router();
-const { authenticate } = require('../middleware/auth');
+const { authenticate, requireLeadership } = require('../middleware/auth');
 const { getDb } = require('../config/firebase');
 
+router.use(authenticate);
+router.use(requireLeadership);
+
 // GET /api/analytics/work-summary?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
-router.get('/work-summary', authenticate, async (req, res) => {
+router.get('/work-summary', async (req, res) => {
   try {
     const db = getDb();
     const { startDate, endDate, uid } = req.query;
@@ -59,7 +62,7 @@ router.get('/work-summary', authenticate, async (req, res) => {
 });
 
 // GET /api/analytics/status-timeline?startDate=&endDate=&uid=
-router.get('/status-timeline', authenticate, async (req, res) => {
+router.get('/status-timeline', async (req, res) => {
   try {
     const db = getDb();
     const { startDate, endDate, uid } = req.query;
@@ -79,6 +82,39 @@ router.get('/status-timeline', authenticate, async (req, res) => {
   } catch (err) {
     console.error('analytics/status-timeline error:', err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/export.csv', async (req, res) => {
+  try {
+    const db = getDb();
+    const { startDate, endDate, uid } = req.query;
+    let attendanceSnap = await db.collection('attendance').limit(1500).get();
+    let attendance = attendanceSnap.docs.map((doc) => doc.data());
+    if (uid) attendance = attendance.filter((r) => r.uid === uid);
+    if (startDate) attendance = attendance.filter((r) => r.joinTime >= `${startDate}T00:00:00.000Z`);
+    if (endDate) attendance = attendance.filter((r) => r.joinTime <= `${endDate}T23:59:59.999Z`);
+    attendance.sort((a, b) => new Date(b.joinTime) - new Date(a.joinTime));
+
+    const rows = [
+      ['Name', 'UID', 'Room', 'Join Time', 'Leave Time', 'Duration Seconds', 'Status'],
+      ...attendance.map((r) => [
+        r.displayName || '',
+        r.uid || '',
+        r.roomName || r.roomId || '',
+        r.joinTime || '',
+        r.leaveTime || '',
+        r.durationSeconds || 0,
+        r.status || '',
+      ]),
+    ];
+    const csv = rows.map((row) => row.map((cell) => `"${String(cell ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="synkarya-report-${new Date().toISOString().slice(0, 10)}.csv"`);
+    return res.send(csv);
+  } catch (err) {
+    console.error('analytics/export.csv error:', err);
+    return res.status(500).json({ error: err.message });
   }
 });
 
