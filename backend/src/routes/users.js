@@ -70,6 +70,43 @@ router.post('/status', async (req, res) => {
   }
 });
 
+router.post('/push-token', async (req, res) => {
+  try {
+    const { token, platform = 'unknown' } = req.body;
+    if (!token?.trim()) return res.status(400).json({ error: 'Push token required' });
+    const db = getDb();
+    const now = new Date().toISOString();
+    await db.collection('users').doc(req.user.uid).set({
+      pushTokens: {
+        [token.trim()]: { platform, updatedAt: now },
+      },
+      reachable: true,
+      lastSeen: now,
+      explicitLogout: false,
+    }, { merge: true });
+    return res.status(200).json({ message: 'Push token saved' });
+  } catch (err) {
+    console.error('Save push token error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/push-token', async (req, res) => {
+  try {
+    const db = getDb();
+    await db.collection('users').doc(req.user.uid).set({
+      pushTokens: {},
+      reachable: false,
+      explicitLogout: true,
+      loggedOutAt: new Date().toISOString(),
+    }, { merge: true });
+    return res.status(200).json({ message: 'Push tokens cleared' });
+  } catch (err) {
+    console.error('Clear push token error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // Get status history
 router.get('/status-history/:uid', async (req, res) => {
   try {

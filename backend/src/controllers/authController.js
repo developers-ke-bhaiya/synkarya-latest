@@ -81,7 +81,11 @@ const login = async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    db.collection('users').doc(userData.uid).update({ lastSeen: new Date().toISOString() }).catch(() => {});
+    db.collection('users').doc(userData.uid).update({
+      lastSeen: new Date().toISOString(),
+      reachable: true,
+      explicitLogout: false,
+    }).catch(() => {});
     const token = signToken({ uid: userData.uid });
 
     return res.status(200).json({

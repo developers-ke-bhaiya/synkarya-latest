@@ -3,12 +3,49 @@ const { authenticateSocket } = require('../middleware/auth');
 const { recordJoin, recordLeave } = require('./attendanceService');
 const roomState = require('./roomStateService');
 const { getDb } = require('../config/firebase');
+const admin = require('firebase-admin');
 
 const MAX_ROOM_SIZE = 12;
 const onlineUsers = new Map(); // uid → userObject
 
 const broadcastOnline = (io) => {
   io.emit('online_users', Array.from(onlineUsers.values()));
+};
+
+const sendIncomingCallPush = async ({ targetUid, fromUid, fromDisplayName }) => {
+  try {
+    const doc = await getDb().collection('users').doc(targetUid).get();
+    if (!doc.exists) return false;
+    const user = doc.data();
+    if (user.explicitLogout || user.reachable === false) return false;
+    const tokens = Object.keys(user.pushTokens || {});
+    if (!tokens.length) return false;
+    await admin.messaging().sendEachForMulticast({
+      tokens,
+      notification: {
+        title: 'Incoming Synkarya call',
+        body: `${fromDisplayName || 'A teammate'} is calling you`,
+      },
+      data: {
+        type: 'direct_call',
+        fromUid: fromUid || '',
+        fromDisplayName: fromDisplayName || '',
+      },
+      android: {
+        priority: 'high',
+        notification: {
+          channelId: 'default',
+          sound: 'default',
+          priority: 'high',
+          clickAction: 'OPEN_SYNKARYA_CALL',
+        },
+      },
+    });
+    return true;
+  } catch (err) {
+    console.error('sendIncomingCallPush error:', err.message);
+    return false;
+  }
 };
 
 const setupSocketHandlers = (io) => {
@@ -137,9 +174,14 @@ const setupSocketHandlers = (io) => {
       if (t) io.to(t.socketId).emit(event, data);
     };
 
-    socket.on('direct_call_request', ({ targetUid }) => {
+    socket.on('direct_call_request', async ({ targetUid }) => {
       const t = onlineUsers.get(targetUid);
-      if (!t) { socket.emit('direct_call_error', { message: 'User not online' }); return; }
+      if (!t) {
+        const pushed = await sendIncomingCallPush({ targetUid, fromUid: uid, fromDisplayName: displayName });
+        if (!pushed) socket.emit('direct_call_error', { message: 'User is not reachable' });
+        else socket.emit('direct_call_ringing', { targetUid, push: true });
+        return;
+      }
       io.to(t.socketId).emit('direct_call_incoming', { fromUid: uid, fromDisplayName: displayName, fromAvatar: avatar });
       socket.emit('direct_call_ringing', { targetUid });
     });
