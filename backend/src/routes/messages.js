@@ -5,6 +5,28 @@ const { getDb } = require('../config/firebase');
 
 router.use(authenticate);
 
+router.get('/dm/:peerUid', async (req, res) => {
+  try {
+    const { peerUid } = req.params;
+    const limit = parseInt(req.query.limit, 10) || 80;
+    const db = getDb();
+    const threadId = [req.user.uid, peerUid].sort().join('_');
+
+    const snapshot = await db
+      .collection('directMessages')
+      .where('threadId', '==', threadId)
+      .limit(limit)
+      .get();
+
+    const messages = snapshot.docs.map((doc) => doc.data());
+    messages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    return res.status(200).json({ messages });
+  } catch (err) {
+    console.error('Get DM messages error:', err.message);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
 router.get('/room/:roomId', async (req, res) => {
   try {
     const { roomId } = req.params;

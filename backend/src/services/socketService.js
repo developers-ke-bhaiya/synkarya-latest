@@ -330,16 +330,22 @@ const setupSocketHandlers = (io) => {
       }
     });
 
-    socket.on('dm_message', ({ targetUid, message }) => {
+    socket.on('dm_message', async ({ targetUid, message }) => {
       const t = onlineUsers.get(targetUid);
-      if (!t || !message?.trim()) return;
+      if (!targetUid || !message?.trim()) return;
+      const threadId = [uid, targetUid].sort().join('_');
       const msg = {
-        id: uuidv4(), uid, displayName, avatar,
+        id: uuidv4(), threadId, uid, fromUid: uid, toUid: targetUid, displayName, avatar,
         message: message.trim(),
         timestamp: new Date().toISOString(),
+        status: 'sent',
       };
-      // Send to receiver
-      io.to(t.socketId).emit('dm_message', { ...msg, fromUid: uid });
+      try {
+        await getDb().collection('directMessages').doc(msg.id).set(msg);
+      } catch (err) {
+        console.error('dm_message save error:', err.message);
+      }
+      if (t) io.to(t.socketId).emit('dm_message', { ...msg, fromUid: uid });
       // Echo back to sender as confirmation
       socket.emit('dm_message_sent', { ...msg, toUid: targetUid });
     });
